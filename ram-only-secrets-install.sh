@@ -194,8 +194,11 @@ echo
 echo "New blob checksum (sha256) -- for the verification step in Section 6:"
 sha256sum "\$BLOB"
 echo
-echo "New blob, base64 -- this IS the backup, not an extra copy of one."
-echo "Without it, losing this host means losing these secrets permanently."
+echo "New blob, base64 -- useful ONLY paired with a host-key backup"
+echo "(Section 7.5, optional). Without that key it's exactly as useless as"
+echo "leaving it on disk. The plaintext values you just edited, not this"
+echo "blob, are what disaster recovery depends on by default (Section 8.1)"
+echo "-- make sure your saved copy of those is current too, not just this."
 echo "Copy this ENTIRE line into your password manager now:"
 base64 -w0 "\$BLOB"; echo
 echo
@@ -283,10 +286,14 @@ ls -l "/run/${APP}-secrets/.env"
 
 # --- 7. First backup ---
 echo
-echo "== First backup -- this IS the backup, not an optional extra. =="
-echo "If this host is ever lost and nothing was saved elsewhere, these"
-echo "secrets are gone permanently -- there is no other recovery path."
-echo "Copy this into your password manager now (Section 7.2):"
+echo "== First backup -- useful ONLY paired with a host-key backup"
+echo "(Section 7.5, optional). Without that key it's exactly as useless as"
+echo "leaving it on disk -- the plaintext values from step 4, already saved"
+echo "to your password manager, are what disaster recovery depends on by"
+echo "default (Section 8.1), not this blob. =="
+echo "Copy this into your password manager now anyway (Section 7.2) --"
+echo "it's what makes the faster recovery path possible if you ever add"
+echo "the host-key backup later:"
 sha256sum "/etc/credstore.encrypted/${APP}-env"
 base64 -w0 "/etc/credstore.encrypted/${APP}-env"; echo
 echo

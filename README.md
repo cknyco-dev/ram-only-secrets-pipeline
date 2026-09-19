@@ -50,7 +50,15 @@ drop it in front of any app that reads a `.env` file.
 - **Shell-history and scrollback leak protection built in** — every step
   that touches real secret values is designed so nothing lands in
   `.bash_history`/`.zsh_history`, with explicit history-clear prompts
-  where it can't be avoided.
+  where it can't be avoided. The secrets unit also clears both history
+  files as a boot-time backstop (`documentation/COMPONENTS.md` §4.2) —
+  deliberately **boot-time only**, not continuous: it guarantees nothing
+  from *before* a reboot survives *past* it, for a system where an agent
+  with shell access might start a fresh session right after one, but it
+  does nothing about history accumulating during a single uptime — that
+  gap is what the manual clear-history steps above are still for. Don't
+  "fix" this into a cron job or a continuous watcher without re-reading
+  why it's boot-scoped.
 - **One-command install**, or do every step by hand — both are documented.
 - **Backup is load-bearing, not optional, and this says so plainly** — a
   real comparison of password-manager options, exactly what to store and
@@ -147,15 +155,26 @@ for the full explanation of why it's structured this way.
 
 ## Backup & disaster recovery
 
-> **The password-manager entry is not an extra step — it is the backup.**
-> The encrypted bundle on disk (`/etc/credstore.encrypted/…`) is ciphertext
-> bound to *this specific host's* own key. If that host is lost — gone,
-> destroyed, disk wiped — and you never saved anything to a password
-> manager, there is nothing left to recover: not from the encrypted blob
-> (worthless without the host), not from a disk snapshot (same problem),
-> nothing. The value you copy into your password manager during setup
-> ([Installation](#installation)) and every rotation ([Usage](#usage)) is
-> the only thing standing between "lost host" and "lost secrets, permanently."
+> **Two different things end up in your password manager here — know which
+> one actually saves you.**
+>
+> - **The plaintext `KEY=value` lines** (typed during setup, and again on
+>   every edit) are what disaster recovery depends on *by default*
+>   ([`DISASTER-RECOVERY.md` §8.1](documentation/DISASTER-RECOVERY.md)) —
+>   no host key needed, works on any new host. **This is the one that must
+>   never be skipped.**
+> - **The encrypted blob** (base64, printed after every commit) is
+>   ciphertext bound to *this specific host's* own key. Saving it to your
+>   password manager does **not**, by itself, protect you from losing this
+>   host — without the host's own key too (an explicit, optional step,
+>   [`BACKUP.md` §7.5](documentation/BACKUP.md#75-optional-backing-up-the-host-key-itself-for-faster-disaster-recovery)),
+>   that blob is exactly as useless as leaving it on disk. Paired with a
+>   host-key backup, it becomes a faster recovery path
+>   ([`DISASTER-RECOVERY.md` §8.2](documentation/DISASTER-RECOVERY.md)) —
+>   without one, it's not a safety net at all.
+>
+> If you only ever save one of these, save the plaintext values — that's
+> the one with no strings attached.
 
 This pipeline gets secrets off disk; backing them up is a separate,
 explicit responsibility — nothing here does it for you automatically.
