@@ -52,9 +52,11 @@ drop it in front of any app that reads a `.env` file.
   `.bash_history`/`.zsh_history`, with explicit history-clear prompts
   where it can't be avoided.
 - **One-command install**, or do every step by hand — both are documented.
-- **Backup strategy included, not hand-waved** — a real comparison of
-  password-manager options, what to store and when, and an honest
-  disaster-recovery procedure for rebuilding on a different host.
+- **Backup is load-bearing, not optional, and this says so plainly** — a
+  real comparison of password-manager options, exactly what to store and
+  when, and an honest disaster-recovery procedure. Skip the backup step
+  and losing the host means losing the secrets, permanently — see
+  [Backup & disaster recovery](#backup--disaster-recovery).
 
 ## How it works
 
@@ -144,6 +146,16 @@ blob — copy that into your password manager immediately. See
 for the full explanation of why it's structured this way.
 
 ## Backup & disaster recovery
+
+> **The password-manager entry is not an extra step — it is the backup.**
+> The encrypted bundle on disk (`/etc/credstore.encrypted/…`) is ciphertext
+> bound to *this specific host's* own key. If that host is lost — gone,
+> destroyed, disk wiped — and you never saved anything to a password
+> manager, there is nothing left to recover: not from the encrypted blob
+> (worthless without the host), not from a disk snapshot (same problem),
+> nothing. The value you copy into your password manager during setup
+> ([Installation](#installation)) and every rotation ([Usage](#usage)) is
+> the only thing standing between "lost host" and "lost secrets, permanently."
 
 This pipeline gets secrets off disk; backing them up is a separate,
 explicit responsibility — nothing here does it for you automatically.

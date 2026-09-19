@@ -59,9 +59,10 @@ case "$PM_CHOSEN" in
   *)
     echo
     echo "Choose one first -- see Section 7.1 for real options (Bitwarden," >&2
-    echo "1Password, KeePassXC, pass). This script is about to generate real" >&2
-    echo "secret material; there needs to be somewhere safe to put a copy of" >&2
-    echo "it the moment that happens. Nothing has been changed yet." >&2
+    echo "1Password, KeePassXC, pass). What you save there is not an extra" >&2
+    echo "copy of the backup -- it IS the backup. If this host is ever lost" >&2
+    echo "and nothing was saved to a password manager, the secrets are gone" >&2
+    echo "permanently, with no other recovery path. Nothing has been changed yet." >&2
     exit 1
     ;;
 esac
@@ -193,7 +194,9 @@ echo
 echo "New blob checksum (sha256) -- for the verification step in Section 6:"
 sha256sum "\$BLOB"
 echo
-echo "New blob, base64 -- copy this ENTIRE line into your password manager now:"
+echo "New blob, base64 -- this IS the backup, not an extra copy of one."
+echo "Without it, losing this host means losing these secrets permanently."
+echo "Copy this ENTIRE line into your password manager now:"
 base64 -w0 "\$BLOB"; echo
 echo
 
@@ -213,7 +216,9 @@ case "\$CONFIRM" in
     ;;
   *)
     echo
-    echo "Not clearing anything. Re-run this reminder any time -- nothing above was destructive."
+    echo "Not clearing history yet -- but save that blob first, not after."
+    echo "It's the only thing that survives losing this host."
+    echo "Re-run this reminder any time; nothing above was destructive."
     ;;
 esac
 SCRIPT_EOF
@@ -262,7 +267,9 @@ printf 'Have you saved each individual secret value you just typed into your pas
 read -r VALUES_SAVED
 case "$VALUES_SAVED" in
   [yY]*) ;;
-  *) echo "Not blocking on this -- but go back and do it now, before you forget which value was which." >&2 ;;
+  *) echo "Not blocking on this -- but these values, not the encrypted blob," >&2
+     echo "are what disaster recovery actually depends on by default when" >&2
+     echo "this host is lost (Section 8.1). Go back and save them now." >&2 ;;
 esac
 
 systemd-creds encrypt --name="${APP}-env" "/dev/shm/${APP}-env.edit" "/etc/credstore.encrypted/${APP}-env"
@@ -276,7 +283,10 @@ ls -l "/run/${APP}-secrets/.env"
 
 # --- 7. First backup ---
 echo
-echo "== First backup -- copy this into your password manager now (Section 7.2) =="
+echo "== First backup -- this IS the backup, not an optional extra. =="
+echo "If this host is ever lost and nothing was saved elsewhere, these"
+echo "secrets are gone permanently -- there is no other recovery path."
+echo "Copy this into your password manager now (Section 7.2):"
 sha256sum "/etc/credstore.encrypted/${APP}-env"
 base64 -w0 "/etc/credstore.encrypted/${APP}-env"; echo
 echo
@@ -284,7 +294,8 @@ printf 'Have you copied the base64 blob above into your password manager and ver
 read -r BLOB_SAVED
 case "$BLOB_SAVED" in
   [yY]*) echo "Good." ;;
-  *) echo "This blob goes stale the moment you next run ${APP}-secrets-commit -- save it before then." >&2 ;;
+  *) echo "Go back and save it now -- this blob also goes stale the moment" >&2
+     echo "you next run ${APP}-secrets-commit, so there's no 'later' here." >&2 ;;
 esac
 
 echo
