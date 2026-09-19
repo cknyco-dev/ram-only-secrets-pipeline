@@ -1,0 +1,7 @@
+# Forking can't be disabled on a public GitHub repo, so anyone can still
+# open a PR (see the Contributing section in README.md) -- this file is
+# what actually gates it: enable branch protection on `main` with
+# "Require review from Code Owners" and nothing merges without @cknyco's
+# explicit approval, regardless of who opens the PR.
+
+* @cknyco

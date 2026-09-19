@@ -1,0 +1,35 @@
+name: Bug report
+description: Something in the pattern, the installer, or the docs doesn't work as documented.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what actually happened instead?
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and systemd version
+      description: Output of `cat /etc/os-release | head -2` and `systemctl --version | head -1`
+    validations:
+      required: true
+  - type: input
+    id: doc-section
+    attributes:
+      label: Which doc or step
+      description: e.g. documentation/INSTALLATION-AND-OPERATION.md#52-one-time-setup
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: >-
+        Relevant command output is welcome -- but redact any real secret
+        VALUES first. See the Security notes section in README.md before
+        pasting anything from a terminal session.
+    validations:
+      required: false

@@ -1,0 +1,6 @@
+# Force LF line endings regardless of the committer's OS/editor. A shell
+# script committed with CRLF line endings fails on Linux with something
+# like "$'\r': command not found" -- easy to introduce silently from a
+# Mac editor, and this repo's whole point is Linux shell/systemd content.
+* text=auto eol=lf
+*.sh text eol=lf

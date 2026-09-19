@@ -1,0 +1,11 @@
+name: Question
+description: Something in the docs is unclear, or you're not sure how a step applies to your setup.
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What's unclear?
+      description: Link the specific section if you can (e.g. documentation/BACKUP.md#75-optional-backing-up-the-host-key-itself-for-faster-disaster-recovery).
+    validations:
+      required: true

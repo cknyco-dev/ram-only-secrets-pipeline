@@ -1,0 +1,22 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor cruft
+*.swp
+*.swo
+*~
+
+# Archived files
+/archive/*
+
+# Defense in depth: nothing shaped like a real secret should ever be
+# committed here. A genuine value belongs in /run/*-secrets (tmpfs) or
+# your password manager -- never in this repository, even by accident.
+*.env
+*.env.*
+.env
+*-env.edit
+*.b64
+credential.secret
+credential.secret.b64
