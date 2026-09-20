@@ -30,9 +30,26 @@ A two-stage secrets pipeline:
 
 ## 2. Why this shape
 
-- **Ciphertext at rest, plaintext only in RAM.** If the disk is imaged,
-  snapshotted, or stolen, the secrets are encrypted. If the host has no swap
-  configured, plaintext never touches a disk block at all, even transiently.
+- **Ciphertext at rest, plaintext only in RAM — provided swap is off.** If
+  the disk is imaged, snapshotted, or stolen, the secrets are encrypted.
+  But `tmpfs` (where the decrypted `.env` file lives, Section 3) is
+  swappable by default like any other memory: under memory pressure the
+  kernel can page it out to a swap device exactly like any other memory
+  page, putting plaintext secrets right back onto persistent disk — just
+  in a swap partition/file instead of a plain one. **No active swap on the
+  host is therefore a hard precondition of the RAM-only guarantee, not an
+  optional hardening step.** Section 5.1 checks for this before touching
+  anything else and refuses to proceed if any swap is active, with no
+  override flag — the same check also runs at every boot (Section 4.2)
+  and before every secret edit (Section 4.4), since swap can be enabled
+  after installation too. `vm.swappiness=0` is not an acceptable
+  substitute for this — it only makes swapping less likely, not
+  impossible; a genuinely absent swap device is the only guarantee strong
+  enough to rely on here. If a host truly cannot go without swap for
+  unrelated reasons, encrypted swap is the only theoretically sound
+  alternative — but this pipeline does not detect, verify, or grant any
+  exception for it; that path is entirely manual, unsupported, and your
+  own responsibility to get right end to end.
 - **No manual re-entry on reboot.** The oneshot unit re-decrypts
   automatically at boot, ordered before whatever consumes it.
 - **Host-bound by design, not a limitation to work around.** `systemd-creds`

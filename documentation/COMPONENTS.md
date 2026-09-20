@@ -25,12 +25,18 @@ Description=Decrypt YOUR_APP secrets into RAM
 DefaultDependencies=no
 Before=user@YOUR_UID.service
 # If the app runs as a system service instead of a user session, point
-# Before= at that unit instead (e.g. Before=YOUR_APP.service).
+# Before= at that unit instead (e.g. Before=YOUR_APP.service) -- and see
+# "One honest limitation" below: Before=, either way, only orders startup,
+# it does not gate it.
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 LoadCredentialEncrypted=YOUR_APP-env:/etc/credstore.encrypted/YOUR_APP-env
+# Hard requirement, not a tunable -- see the explanation right after this
+# unit. No override: if swap is active, this unit refuses to decrypt
+# anything into tmpfs at all, rather than start with the guarantee broken.
+ExecStartPre=/bin/sh -c '[ ! -r /proc/swaps ] || [ "$(wc -l < /proc/swaps)" -le 1 ] || { echo "YOUR_APP-secrets: refusing to start -- swap is active on this host; tmpfs-resident secrets are swappable to disk while enabled. Disable swap (swapoff -a; remove from fstab/systemd) and restart this unit." >&2; exit 1; }'
 ExecStart=/bin/sh -c 'install -d -m 0750 -o YOUR_APP_USER -g YOUR_APP_USER /run/YOUR_APP-secrets && install -m 0600 -o YOUR_APP_USER -g YOUR_APP_USER "$CREDENTIALS_DIRECTORY/YOUR_APP-env" /run/YOUR_APP-secrets/.env'
 # Boot-time history hygiene -- an automatic backstop, not a replacement for
 # the manual clear-history steps in Sections 5.2 and 5.3. See the
@@ -50,6 +56,46 @@ WantedBy=multi-user.target
 is then considered "active" without a running process; systemd won't try to
 restart it or consider it failed once it exits 0. `Before=` guarantees the
 plaintext file exists before anything that needs it starts.
+
+**Why `ExecStartPre=`, and why there's no override.** Swap defeats the
+RAM-only guarantee this whole pipeline exists to provide (Section 2) —
+`tmpfs` is swappable like any other memory, so active swap means the
+kernel can page decrypted secrets out to a disk-backed swap device under
+memory pressure. This check runs *before* `ExecStart=`, so if swap is
+active, the plaintext `.env` file is never written in the first place —
+not written-then-warned-about, never written at all. There is
+deliberately no flag or environment variable to bypass it; the only way
+past this line is to actually remove swap from the host. The same check,
+for the same reason, also runs in `ram-only-secrets-install.sh` (Section
+5.1, before touching anything) and in both helper scripts (Section 4.4,
+on every edit) — swap can be enabled after installation too, so a
+boot-time-only check wouldn't be enough.
+
+**One honest limitation, not hidden: a failed unit doesn't automatically
+stop the app.** `Before=` (used above) only orders startup — it is not a
+dependency. If this unit fails for any reason (the swap check above
+included), systemd does not, by itself, stop `user@YOUR_UID.service` —
+or whatever `Before=` target you're using — from starting anyway. In
+practice the app then finds a missing or dangling `.env` symlink and
+typically fails on its own, but that's the app's own behavior saving you,
+not a systemd guarantee.
+
+If the app runs as its own system service (the `Before=YOUR_APP.service`
+variant mentioned above), close this gap by adding a real dependency on
+*that* unit — YOUR_APP.service, not this one:
+
+```ini
+[Unit]
+Requires=YOUR_APP-secrets.service
+After=YOUR_APP-secrets.service
+```
+
+With that in place, a failed `YOUR_APP-secrets.service` — from the swap
+check or any other reason — actually blocks `YOUR_APP.service` from
+starting at all, instead of merely being ordered before it. There's no
+equivalent for the default `user@YOUR_UID.service` case: session startup
+isn't gated this way, so that path still relies on the app failing on the
+missing file, same as always.
 
 **Why `ExecStartPost=`, and what it actually solves that the interactive
 `history -c` in Sections 5.2/5.3/8.2 doesn't.** Those manual steps only
@@ -97,7 +143,10 @@ executable. These are the only supported way to change a secret after
 initial setup. Editing happens in `/dev/shm`, never `/tmp` — `/dev/shm` is
 guaranteed `tmpfs` (RAM) on every mainstream Linux distribution; `/tmp` is
 not guaranteed to be RAM-backed everywhere, so it's the wrong choice even as
-a short-lived scratch file.
+a short-lived scratch file. Both scripts also refuse to run at all if swap
+is active on the host, same hard requirement and same reasoning as the
+boot unit's `ExecStartPre=` above — swap can be enabled after installation
+too, so this can't be a boot-time-only check.
 
 `/usr/local/sbin/YOUR_APP-secrets-open`:
 
@@ -112,6 +161,15 @@ INSTALLER=/root/ram-only-secrets-install.sh
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run as root (sudo $0)" >&2
+  exit 1
+fi
+
+# Hard requirement, not a tunable -- see Section 4.2 for why. No override.
+if [ -r /proc/swaps ] && [ "$(wc -l < /proc/swaps)" -gt 1 ]; then
+  echo "SWAP IS ACTIVE on this host -- refusing to run." >&2
+  echo "tmpfs-resident secrets are swappable to disk while swap is enabled," >&2
+  echo "which is exactly what this pipeline exists to prevent. Disable swap" >&2
+  echo "first (swapoff -a, then remove it from fstab/systemd permanently)." >&2
   exit 1
 fi
 
@@ -152,6 +210,15 @@ INSTALLER=/root/ram-only-secrets-install.sh
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run as root (sudo $0)" >&2
+  exit 1
+fi
+
+# Hard requirement, not a tunable -- see Section 4.2 for why. No override.
+if [ -r /proc/swaps ] && [ "$(wc -l < /proc/swaps)" -gt 1 ]; then
+  echo "SWAP IS ACTIVE on this host -- refusing to run." >&2
+  echo "tmpfs-resident secrets are swappable to disk while swap is enabled," >&2
+  echo "which is exactly what this pipeline exists to prevent. Disable swap" >&2
+  echo "first (swapoff -a, then remove it from fstab/systemd permanently)." >&2
   exit 1
 fi
 

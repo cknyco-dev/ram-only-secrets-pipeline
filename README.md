@@ -98,6 +98,13 @@ unit, the env-file symlink, and the two helper scripts in full — in
 
 ## Requirements
 
+- **No active swap anywhere on the host.** `tmpfs` (where the decrypted
+  `.env` file lives) is swappable like any other memory, so any active
+  swap defeats the RAM-only guarantee this pipeline exists to provide —
+  see [`documentation/ABOUT.md`](documentation/ABOUT.md#2-why-this-shape).
+  Checked automatically, with no override, everywhere this pipeline
+  touches the system: the installer, the boot service, and both helper
+  scripts.
 - Linux with **systemd ≥ 250** (`systemd-creds` availability; ≥ 259
   recommended for the full feature set this pipeline uses).
 - Standard coreutils: `shred`, `base64`, `sha256sum`, `install`, `nano`.
@@ -107,6 +114,8 @@ unit, the env-file symlink, and the two helper scripts in full — in
 Check directly rather than assuming:
 
 ```bash
+cat /proc/swaps
+# expect only the header line -- see Requirements above if anything else is listed
 systemctl --version | head -1
 which systemd-creds && systemd-creds --version
 which shred base64 sha256sum install nano
@@ -229,6 +238,13 @@ Read them in the order listed on a first pass — each assumes the last.
 
 ## Security notes
 
+- **The RAM-only guarantee assumes no active swap, full stop.** `tmpfs` is
+  swappable like any other memory — with swap enabled, decrypted secrets
+  can be paged out to a swap device under memory pressure, which is
+  exactly the disk exposure this pipeline exists to prevent, just
+  relocated. There is no override flag for this anywhere in the pipeline;
+  see [Requirements](#requirements) and
+  [`documentation/ABOUT.md`](documentation/ABOUT.md#2-why-this-shape).
 - Review the installer and every generated unit/script before running
   them as root, the same as you would with any script you didn't write
   yourself.
