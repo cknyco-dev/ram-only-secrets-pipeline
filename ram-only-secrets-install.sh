@@ -85,6 +85,36 @@ fi
 
 echo "== Section 5.1: checking prerequisites =="
 
+# Swap must be completely inactive -- tmpfs (where the RAM-only .env file
+# will live, Section 3) is swappable by default like any other memory.
+# With swap enabled, the kernel can page decrypted secrets out to a swap
+# device under memory pressure, putting exactly the plaintext-on-disk
+# exposure this pipeline exists to prevent back on the table -- just in
+# swap instead of in a file. This is a hard requirement, not a tunable:
+# there is no override flag for this check.
+if [ -r /proc/swaps ] && [ "$(wc -l < /proc/swaps)" -gt 1 ]; then
+  echo "SWAP IS ACTIVE -- refusing to install." >&2
+  echo >&2
+  echo "Active swap on this host:" >&2
+  cat /proc/swaps >&2
+  echo >&2
+  echo "tmpfs is swappable by default: under memory pressure the kernel" >&2
+  echo "can page its contents out to a swap device, same as any other" >&2
+  echo "memory. With swap enabled, that reopens the exact disk-exposure" >&2
+  echo "hole this pipeline exists to close -- just relocated to a swap" >&2
+  echo "device instead of a plain file. See documentation/ABOUT.md Section 2." >&2
+  echo >&2
+  echo "Disable and remove swap before installing:" >&2
+  echo "  sudo swapoff -a" >&2
+  echo "  # then remove/comment its entries so it doesn't return on reboot:" >&2
+  echo "  grep -n swap /etc/fstab" >&2
+  echo "  systemctl list-units --type=swap --all" >&2
+  echo "  # a zram device or other swap generator may need disabling at its own source" >&2
+  echo >&2
+  echo "There is no override flag for this check. Nothing has been changed yet." >&2
+  exit 1
+fi
+
 FAIL=0
 
 if ! command -v systemd-creds >/dev/null 2>&1; then
@@ -132,6 +162,16 @@ if [ "\$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Hard requirement, not a tunable -- see ram-only-secrets-install.sh Section
+# 5.1 / documentation/ABOUT.md Section 2 for why. No override flag.
+if [ -r /proc/swaps ] && [ "\$(wc -l < /proc/swaps)" -gt 1 ]; then
+  echo "SWAP IS ACTIVE on this host -- refusing to run." >&2
+  echo "tmpfs-resident secrets are swappable to disk while swap is enabled," >&2
+  echo "which is exactly what this pipeline exists to prevent. Disable swap" >&2
+  echo "first (swapoff -a, then remove it from fstab/systemd permanently)." >&2
+  exit 1
+fi
+
 if [ -f "\$EDIT_FILE" ]; then
   echo "An edit is already in progress at \$EDIT_FILE -- finish or discard it first." >&2
   exit 1
@@ -169,6 +209,16 @@ INSTALLER=/root/ram-only-secrets-install.sh
 
 if [ "\$(id -u)" -ne 0 ]; then
   echo "Run as root (sudo \$0)" >&2
+  exit 1
+fi
+
+# Hard requirement, not a tunable -- see ram-only-secrets-install.sh Section
+# 5.1 / documentation/ABOUT.md Section 2 for why. No override flag.
+if [ -r /proc/swaps ] && [ "\$(wc -l < /proc/swaps)" -gt 1 ]; then
+  echo "SWAP IS ACTIVE on this host -- refusing to run." >&2
+  echo "tmpfs-resident secrets are swappable to disk while swap is enabled," >&2
+  echo "which is exactly what this pipeline exists to prevent. Disable swap" >&2
+  echo "first (swapoff -a, then remove it from fstab/systemd permanently)." >&2
   exit 1
 fi
 
@@ -240,6 +290,10 @@ Before=user@${APP_UID}.service
 Type=oneshot
 RemainAfterExit=yes
 LoadCredentialEncrypted=${APP}-env:/etc/credstore.encrypted/${APP}-env
+# Hard requirement, not a tunable -- see documentation/COMPONENTS.md Section
+# 4.2 for why. No override: if swap is active, this unit refuses to decrypt
+# anything into tmpfs at all, rather than start with the guarantee broken.
+ExecStartPre=/bin/sh -c '[ ! -r /proc/swaps ] || [ "\$(wc -l < /proc/swaps)" -le 1 ] || { echo "${APP}-secrets: refusing to start -- swap is active on this host; tmpfs-resident secrets are swappable to disk while enabled. Disable swap (swapoff -a; remove from fstab/systemd) and restart this unit." >&2; exit 1; }'
 ExecStart=/bin/sh -c 'install -d -m 0750 -o ${APP_USER} -g ${APP_USER} /run/${APP}-secrets && install -m 0600 -o ${APP_USER} -g ${APP_USER} "\$CREDENTIALS_DIRECTORY/${APP}-env" /run/${APP}-secrets/.env'
 ExecStartPost=/bin/sh -c 'for f in /root/.bash_history /root/.zsh_history ${APP_HOME}/.bash_history ${APP_HOME}/.zsh_history; do [ -e "\$f" ] && : > "\$f"; done; true'
 ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$i" ] && ! git -C "\$(dirname "\$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "\$i"; fi; true'

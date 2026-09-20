@@ -53,6 +53,28 @@ itself.** Three things this fast path adds beyond the bare mechanics of
 
 Don't take these on faith — check them directly.
 
+**Hard requirement, checked first: no active swap anywhere on this host.**
+`tmpfs` (where the decrypted `.env` file will live, Section 3) is
+swappable by default like any other memory — with swap enabled, the
+kernel can page plaintext secrets out to a swap device under memory
+pressure, defeating the entire RAM-only guarantee this pipeline exists to
+provide (`documentation/ABOUT.md` Section 2). This is not a soft
+recommendation: the installer, the boot unit, and both helper scripts all
+independently refuse to run while any swap is active, with no override
+flag anywhere.
+
+```bash
+cat /proc/swaps
+# expect: only the header line ("Filename Type Size Used Priority"),
+# nothing below it. Anything listed below that line is active swap --
+# disable and remove it before going any further:
+sudo swapoff -a
+# then remove/comment its entries so it doesn't return on reboot:
+grep -n swap /etc/fstab
+systemctl list-units --type=swap --all
+# a zram device or another swap generator may need disabling at its own source
+```
+
 ```bash
 # systemd-creds has shipped as part of systemd since v250. Confirm both
 # the binary and systemctl agree on a recent-enough version:
@@ -183,6 +205,10 @@ ln -s /run/YOUR_APP-secrets/.env YOUR_APP_DIR/.env
       exists with correct content *without* any manual step.
 - [ ] Confirm no plaintext copy exists anywhere on persistent disk (check
       shell history, `/tmp`, any editor swap/backup files).
+- [ ] `cat /proc/swaps` still shows only the header line -- no OS-level
+      swap (distinct from the editor swap files in the bullet above) has
+      been enabled since Section 5.1. Required, not optional -- see
+      `documentation/ABOUT.md` Section 2.
 - [ ] Confirm `/etc/credstore.encrypted/YOUR_APP-env` is unreadable as
       plaintext (`file /etc/credstore.encrypted/YOUR_APP-env` should report
       binary/opaque data, not text).
