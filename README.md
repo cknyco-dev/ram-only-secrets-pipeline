@@ -140,7 +140,7 @@ grep . /sys/kernel/kexec/crash_loaded /sys/kernel/kexec/crash_size \
 uname -r
 systemctl --version | head -1
 which systemd-creds && systemd-creds --version
-which shred base64 sha256sum install stat readlink nano
+which shred base64 sha256sum install stat readlink getent nano
 ```
 
 Missing something? See

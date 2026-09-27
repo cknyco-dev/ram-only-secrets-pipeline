@@ -63,7 +63,7 @@ ExecStart=/bin/sh -c 'install -d -m 0750 -o YOUR_APP_USER -g YOUR_APP_USER /run/
 # the manual clear-history steps in Sections 5.2 and 5.3. See the
 # explanation right after this unit for what it does and does not cover.
 # Adjust the path list to match where YOUR_APP_USER's home actually is.
-ExecStartPost=/bin/sh -c 'for f in /root/.bash_history /root/.zsh_history /home/YOUR_APP_USER/.bash_history /home/YOUR_APP_USER/.zsh_history; do [ -e "$f" ] && : > "$f"; done; true'
+ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "/home/YOUR_APP_USER/.bash_history" "/home/YOUR_APP_USER/.zsh_history"; do [ -e "$f" ] && : > "$f"; done; true'
 # Installer cleanup backstop -- see Section 5.0. Removes a stray copy of
 # ram-only-secrets-install.sh at the standard path, unless it's sitting
 # inside a kept git checkout (Section 7.4), in which case it's left alone.

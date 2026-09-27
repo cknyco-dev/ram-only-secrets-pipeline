@@ -78,10 +78,14 @@ if [ -z "$APP_UID" ]; then
   exit 1
 fi
 
-APP_HOME="$(eval echo "~${APP_USER}")"
-if [ ! -d "$APP_HOME" ]; then
+# Home directory from the passwd database; no eval of the argument.
+APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
+if [ -z "$APP_HOME" ] || [ ! -d "$APP_HOME" ]; then
   echo "Warning: resolved home directory '$APP_HOME' for '$APP_USER' does not exist." >&2
   echo "The boot-time history-cleanup line will simply skip files under it -- harmless, but check APP_USER is right." >&2
+  # No passwd entry yet (UID given as 3rd argument): never let the cleanup
+  # paths become /.bash_history. /nonexistent must not exist (Debian policy).
+  APP_HOME="${APP_HOME:-/nonexistent}"
 fi
 
 # --- ros-lib begin ---
@@ -652,7 +656,7 @@ if ! command -v systemd-creds >/dev/null 2>&1; then
   FAIL=1
 fi
 
-for tool in shred base64 sha256sum install stat readlink nano systemctl; do
+for tool in shred base64 sha256sum install stat readlink getent nano systemctl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "MISSING: $tool" >&2
     FAIL=1
@@ -902,7 +906,7 @@ ExecStartPre=/usr/local/sbin/${APP}-secrets-guard check
 # the plain directory.
 ExecStart=/usr/local/sbin/${APP}-secrets-guard mount /run/${APP}-secrets
 ExecStart=/bin/sh -c 'install -d -m 0750 -o ${APP_USER} -g ${APP_USER} /run/${APP}-secrets && install -m 0600 -o ${APP_USER} -g ${APP_USER} "\$CREDENTIALS_DIRECTORY/${APP}-env" /run/${APP}-secrets/.env'
-ExecStartPost=/bin/sh -c 'for f in /root/.bash_history /root/.zsh_history ${APP_HOME}/.bash_history ${APP_HOME}/.zsh_history; do [ -e "\$f" ] && : > "\$f"; done; true'
+ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "${APP_HOME}/.bash_history" "${APP_HOME}/.zsh_history"; do [ -e "\$f" ] && : > "\$f"; done; true'
 ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$i" ] && ! git -C "\$(dirname "\$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "\$i"; fi; true'
 
 [Install]

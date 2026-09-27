@@ -110,7 +110,7 @@ systemd-creds has-tpm2 || echo "no TPM2 -- host-only key will be used, which is 
 # The plain coreutils this pipeline relies on -- present on virtually
 # every Linux install already (GNU or Ubuntu 26.04's uutils), confirm
 # rather than assume:
-which shred base64 sha256sum install stat readlink nano
+which shred base64 sha256sum install stat readlink getent nano
 ```
 
 If `systemd-creds` is missing entirely, or `systemctl --version` reports
