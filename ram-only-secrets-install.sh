@@ -751,6 +751,8 @@ if [ -z "$APP_HOME" ] || [ ! -d "$APP_HOME" ]; then
   APP_HOME="${APP_HOME:-/nonexistent}"
 fi
 
+# Local account list read by the group check below (tests point it at a fixture).
+ROS_PASSWD_FILE=/etc/passwd
 # --- group check begin ---
 # On a ramfs (kernel older than 6.4, or the noswap mount refused) the unit
 # keeps root as the owner of .env and lets group ${APP_USER} read it
@@ -775,9 +777,12 @@ elif ! id -Gn "$APP_USER" | tr ' ' '\n' | grep -qxF -- "$APP_USER"; then
   echo "Warning: '$APP_USER' is not a member of group '$APP_USER'. Fine on this kernel (.env on a noswap tmpfs belongs to '$APP_USER'), but should the noswap mount ever be refused, the ramfs fallback makes .env readable only through that group." >&2
 fi
 # Where .env lands on a ramfs, every other account in that group can read it.
+# Accounts with it as their primary group are read from the local passwd
+# file: enumerating a directory service (getent passwd without a name) can
+# be slow, or switched off, as SSSD does by default.
 if getent group "$APP_USER" >/dev/null; then
   ROS_GID=$(getent group "$APP_USER" | cut -d: -f3)
-  ROS_OTHERS=$( { getent group "$APP_USER" | cut -d: -f4 | tr ',' '\n'; getent passwd | awk -F: -v g="$ROS_GID" '$4 == g {print $1}'; } | grep -vxF -- "$APP_USER" | sort -u | tr '\n' ' ')
+  ROS_OTHERS=$( { getent group "$APP_USER" | cut -d: -f4 | tr ',' '\n'; awk -F: -v g="$ROS_GID" '$4 == g {print $1}' "$ROS_PASSWD_FILE"; } | grep -vxF -- "$APP_USER" | sort -u | tr '\n' ' ')
   if [ -n "${ROS_OTHERS# }" ]; then
     echo "Warning: group '$APP_USER' also contains: $ROS_OTHERS. Where .env lands on a ramfs (kernel older than 6.4), they can read it too." >&2
   fi
@@ -1023,13 +1028,15 @@ ExecStartPre=/usr/local/sbin/${APP}-secrets-guard check
 # out, whatever swap is switched on later. Reused as is on restart; only if
 # both mounts are refused it warns and keeps the plain directory.
 ExecStart=/usr/local/sbin/${APP}-secrets-guard mount /run/${APP}-secrets
+# In the sh -c lines below, every \$ meant for the shell is written \$\$:
+# systemd.service(5) turns \$\$ into one literal \$ before sh runs.
 # On a noswap tmpfs (capped at 2 MiB) the directory and .env go to
 # ${APP_USER}, 0750 and 0600, as always. On a ramfs, which has no size
 # limit, root keeps both and ${APP_USER} reads .env through its group
 # (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
-ExecStart=/bin/sh -c 'o="${APP_USER}" m="0600"; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/${APP}-secrets .* - ramfs " /proc/self/mountinfo; then o="root" m="0440"; fi; install -d -m 0750 -o "\$o" -g "${APP_USER}" "/run/${APP}-secrets" && install -m "\$m" -o "\$o" -g "${APP_USER}" "\$CREDENTIALS_DIRECTORY/${APP}-env" "/run/${APP}-secrets/.env"'
-ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "${APP_HOME}/.bash_history" "${APP_HOME}/.zsh_history"; do [ -e "\$f" ] && : > "\$f"; done; true'
-ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$i" ] && ! git -C "\$(dirname "\$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "\$i"; fi; true'
+ExecStart=/bin/sh -c 'o="${APP_USER}" m="0600"; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/${APP}-secrets .* - ramfs " /proc/self/mountinfo; then o="root" m="0440"; fi; install -d -m 0750 -o "\$\$o" -g "${APP_USER}" "/run/${APP}-secrets" && install -m "\$\$m" -o "\$\$o" -g "${APP_USER}" "\$\$CREDENTIALS_DIRECTORY/${APP}-env" "/run/${APP}-secrets/.env"'
+ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "${APP_HOME}/.bash_history" "${APP_HOME}/.zsh_history"; do [ -e "\$\$f" ] && : > "\$\$f"; done; true'
+ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$\$i" ] && ! git -C "\$\$(dirname "\$\$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "\$\$i"; fi; true'
 
 [Install]
 WantedBy=multi-user.target

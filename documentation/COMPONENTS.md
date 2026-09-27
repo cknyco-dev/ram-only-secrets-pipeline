@@ -58,20 +58,22 @@ ExecStartPre=/usr/local/sbin/YOUR_APP-secrets-guard check
 # paged out, whatever swap is switched on later. Reused as is on restart;
 # only if both mounts are refused it warns and keeps the plain directory.
 ExecStart=/usr/local/sbin/YOUR_APP-secrets-guard mount /run/YOUR_APP-secrets
+# In the sh -c lines below, every $ meant for the shell is written $$:
+# systemd.service(5) turns $$ into one literal $ before sh runs.
 # On a noswap tmpfs (capped at 2 MiB) the directory and .env go to
 # YOUR_APP_USER, 0750 and 0600, as always. On a ramfs, which has no size
 # limit, root keeps both and YOUR_APP_USER reads .env through its group
 # (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
-ExecStart=/bin/sh -c 'o="YOUR_APP_USER" m="0600"; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/YOUR_APP-secrets .* - ramfs " /proc/self/mountinfo; then o="root" m="0440"; fi; install -d -m 0750 -o "$o" -g "YOUR_APP_USER" "/run/YOUR_APP-secrets" && install -m "$m" -o "$o" -g "YOUR_APP_USER" "$CREDENTIALS_DIRECTORY/YOUR_APP-env" "/run/YOUR_APP-secrets/.env"'
+ExecStart=/bin/sh -c 'o="YOUR_APP_USER" m="0600"; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/YOUR_APP-secrets .* - ramfs " /proc/self/mountinfo; then o="root" m="0440"; fi; install -d -m 0750 -o "$$o" -g "YOUR_APP_USER" "/run/YOUR_APP-secrets" && install -m "$$m" -o "$$o" -g "YOUR_APP_USER" "$$CREDENTIALS_DIRECTORY/YOUR_APP-env" "/run/YOUR_APP-secrets/.env"'
 # Boot-time history hygiene -- an automatic backstop, not a replacement for
 # the manual clear-history steps in Sections 5.2 and 5.3. See the
 # explanation right after this unit for what it does and does not cover.
 # Adjust the path list to match where YOUR_APP_USER's home actually is.
-ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "/home/YOUR_APP_USER/.bash_history" "/home/YOUR_APP_USER/.zsh_history"; do [ -e "$f" ] && : > "$f"; done; true'
+ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "/home/YOUR_APP_USER/.bash_history" "/home/YOUR_APP_USER/.zsh_history"; do [ -e "$$f" ] && : > "$$f"; done; true'
 # Installer cleanup backstop -- see Section 5.0. Removes a stray copy of
 # ram-only-secrets-install.sh at the standard path, unless it's sitting
 # inside a kept git checkout (Section 7.4), in which case it's left alone.
-ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "$i" ] && ! git -C "$(dirname "$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "$i"; fi; true'
+ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "$$i" ] && ! git -C "$$(dirname "$$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "$$i"; fi; true'
 
 [Install]
 WantedBy=multi-user.target

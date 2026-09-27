@@ -641,8 +641,12 @@ expect "unit mounts the noswap tmpfs before writing .env" \
 # install replaced by echo: app user 0600 on a noswap tmpfs, root with
 # group read (0440) on a ramfs.
 sed -n "s|^ExecStart=/bin/sh -c '\(o=.*\)'\$|\1|p" "$T/unit" |
-  sed -e "s|/proc/self/mountinfo|$T/own.mountinfo|" -e 's/install /echo install /g' > "$T/own.sh"
+  sed -e "s|/proc/self/mountinfo|$T/own.mountinfo|" -e 's/install /echo install /g' -e 's/[$][$]/$/g' > "$T/own.sh"
 expect "unit has exactly one ownership step" [ "$(grep -c . "$T/own.sh")" = 1 ]
+# systemd.service(5): "$$" is a literal "$"; a single "$" before a name is
+# left to systemd's own rules. Every shell variable in the unit uses "$$".
+expect "unit writes every shell \$ in its sh -c lines as \$\$" \
+  not_grep -E "^Exec[A-Za-z]*=/bin/sh -c .*([^$]|^)[$][A-Za-z_(]" "$T/unit"
 echo "99 25 0:77 / /run/myapp-secrets rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64,noswap" > "$T/own.mountinfo"
 t "unit on a noswap tmpfs: .env owned by the app user, 0600" 0 \
   "*install -d -m 0750 -o myuser -g myuser /run/myapp-secrets*install -m 0600 -o myuser -g myuser *" sh "$T/own.sh"
@@ -696,7 +700,7 @@ cat > "$G/getent" <<'EOF'
 #!/bin/sh
 case "$1" in
   group) [ -n "$FAKE_GROUP" ] || exit 2; echo "$FAKE_GROUP" ;;
-  passwd) printf '%s\n' "$FAKE_PASSWD" ;;
+  passwd) echo "getent passwd must not enumerate" >&2; exit 3 ;;
 esac
 EOF
 cat > "$G/id" <<'EOF'
@@ -707,8 +711,9 @@ EOF
 chmod 755 "$G/getent" "$G/id"
 # gcheck NOSWAP(0|1) GROUPLINE USER_EXISTS GROUPS PASSWD
 gcheck() {
-  env PATH="$G" FAKE_GROUP="$2" FAKE_USER_EXISTS="$3" FAKE_GROUPS="$4" FAKE_PASSWD="$5" "$SH" -c \
-    "set -eu; APP=myapp APP_USER=myuser APP_UID=1001; ros_kernel_has_tmpfs_noswap() { [ $1 = 1 ]; }; . '$T/group.sh'; echo GROUP-CHECK-PASSED"
+  printf '%s\n' "$5" > "$T/passwd"
+  env PATH="$G" FAKE_GROUP="$2" FAKE_USER_EXISTS="$3" FAKE_GROUPS="$4" "$SH" -c \
+    "set -eu; APP=myapp APP_USER=myuser APP_UID=1001 ROS_PASSWD_FILE='$T/passwd'; ros_kernel_has_tmpfs_noswap() { [ $1 = 1 ]; }; . '$T/group.sh'; echo GROUP-CHECK-PASSED"
 }
 t "group check: member of its own group, no warning" 0 "GROUP-CHECK-PASSED" \
   gcheck 1 "myuser:x:1001:" 1 "myuser" "myuser:x:1001:1001::/home/myuser:/bin/sh"
