@@ -13,7 +13,7 @@
 #   sudo ./ram-only-secrets-install.sh APP_NAME APP_USER [UID]
 #
 #   APP_NAME  -- short identifier, e.g. "myapp" (becomes YOUR_APP throughout)
-#   APP_USER  -- the unprivileged user that owns the RAM copy (must already exist)
+#   APP_USER  -- the unprivileged user that reads the RAM copy (must already exist)
 #   UID       -- APP_USER's numeric UID (optional; auto-detected if omitted)
 #
 # Where to run this from (Section 5.0): if you're keeping this script in a
@@ -118,11 +118,11 @@ ros_me=${0##*/}
 ros_say() { printf '%s: %s\n' "$ros_me" "$*" >&2; }
 ros_info() { printf '%s: %s\n' "$ros_me" "$*"; }
 
-# The only five operations a test cannot fake without root: asking whether
-# a path is a block device, reading its device number, mount, umount, and
-# comparing this process's mount namespace with PID 1's. tests/run.sh
-# replaces exactly these five, plus ros_pause so the tests don't wait;
-# everything else runs as is.
+# The only six operations a test cannot fake without root: asking whether
+# a path is a block device, reading its device number, mounting a noswap
+# tmpfs, mounting a ramfs, umount, and comparing this process's mount
+# namespace with PID 1's. tests/run.sh replaces exactly these six, plus
+# ros_pause so the tests don't wait; everything else runs as is.
 ros_is_blockdev() { [ -b "$1" ]; }
 # stat prints a device node's major and minor number in hex, lowercase and
 # without "0x", and -L follows a symlink to the node. GNU coreutils does,
@@ -145,9 +145,23 @@ ros_pause() { sleep 1; }
 # size=2m: one systemd credential may be up to 1 MiB (CREDENTIAL_SIZE_MAX,
 # systemd v259 src/shared/creds-util.h:12). mode=0700 keeps the directory
 # root-only until the unit's next ExecStart= line hands it to
-# YOUR_APP_USER, the same step that ran before this mount existed.
+# YOUR_APP_USER, the same step that ran before this mount existed (on a
+# ramfs, that line keeps root as the owner instead; see below).
 ros_mount_noswap() {
   mount -t tmpfs -o noswap,size=2m,nr_inodes=16,mode=0700,nosuid,nodev,noexec tmpfs "$1"
+}
+# ramfs where noswap is unavailable (kernel older than 6.4, or the noswap
+# mount refused). Its pages are never swapped: ramfs_get_inode() marks every
+# mapping unevictable (fs/ramfs/inode.c, mapping_set_unevictable()), which
+# is why systemd falls back to ramfs for $CREDENTIALS_DIRECTORY too. ramfs
+# ignores every option but mode and has no size limit, so "only root (or a
+# trusted user) should be allowed write access to a ramfs mount"
+# (Documentation/filesystems/ramfs-rootfs-initramfs.rst). On a ramfs the
+# unit therefore keeps root as the owner of the directory and .env, with
+# read-only access for group YOUR_APP_USER. nosuid,nodev,noexec are
+# generic mount flags.
+ros_mount_ramfs() {
+  mount -t ramfs -o mode=0700,nosuid,nodev,noexec ramfs "$1"
 }
 ros_umount() { umount "$1"; }
 
@@ -445,6 +459,21 @@ ros_mounts_at() {
   return 0
 }
 
+# ros_unswappable_mount: 0 if the one mount ros_mounts_at found is a
+# noswap tmpfs or a ramfs, the two filesystems whose pages are never
+# swapped; ros_mdesc then names which.
+ros_unswappable_mount() {
+  if [ "$ros_mfs" = tmpfs ] && ros_has_opt noswap "$ros_mopts"; then
+    ros_mdesc='noswap tmpfs'
+    return 0
+  fi
+  if [ "$ros_mfs" = ramfs ]; then
+    ros_mdesc=ramfs
+    return 0
+  fi
+  return 1
+}
+
 # ros_mount_secrets_dir DIR: make DIR its own tmpfs with "noswap", so the
 # decrypted file in it can never be paged out, whatever swap gets switched
 # on after the check ran. shmem_writeout() puts noswap pages straight back
@@ -454,7 +483,7 @@ ros_mounts_at() {
 # plaintext edit copy lives.
 #
 # Idempotent, because YOUR_APP-secrets-commit restarts the unit: a noswap
-# tmpfs already at DIR is reused as is. It never stacks a second tmpfs on
+# tmpfs or ramfs already at DIR is reused as is. It never stacks a second tmpfs on
 # top (that would hide the old plaintext, not free it) and never remounts
 # (noswap cannot be added on remount, mm/shmem.c:4850-4855). It needs
 # CAP_SYS_ADMIN in the initial user namespace (mm/shmem.c:4693-4698) and
@@ -467,9 +496,10 @@ ros_mounts_at() {
 # of them off the unit that runs this.
 #
 # Where noswap is not available (kernel older than 6.4, or the mount is
-# refused, e.g. in an unprivileged container), it warns and leaves DIR a
-# plain directory on /run, the layout this pipeline always used. The swap
-# check stays the gate then, as it always was; the only swap it lets
+# refused), it mounts a ramfs instead (ros_mount_ramfs above). Only if that
+# is refused too, e.g. in an unprivileged container, it warns and leaves
+# DIR a plain directory on /run, the layout this pipeline always used. The
+# swap check stays the gate then, as it always was; the only swap it lets
 # through is zram, which is RAM. What it never does is let a file land in
 # a mount it cannot vouch for.
 ros_mount_secrets_dir() {
@@ -491,17 +521,12 @@ ros_mount_secrets_dir() {
     return 1
   fi
   if [ "$ros_mcount" -eq 1 ]; then
-    if [ "$ros_mfs" = tmpfs ] && ros_has_opt noswap "$ros_mopts"; then
-      ros_info "$ros_dir is already a noswap tmpfs; reusing it."
+    if ros_unswappable_mount; then
+      ros_info "$ros_dir is already a $ros_mdesc; reusing it."
       return 0
     fi
-    ros_say "$ros_dir is already a mount point ($ros_mfs: $ros_mopts) but not a noswap tmpfs. Refusing; nothing was written to it. Unmount it (umount $ros_dir) and try again."
+    ros_say "$ros_dir is already a mount point ($ros_mfs: $ros_mopts) but neither a noswap tmpfs nor a ramfs. Refusing; nothing was written to it. Unmount it (umount $ros_dir) and try again."
     return 1
-  fi
-
-  if ! ros_kernel_has_tmpfs_noswap; then
-    ros_say "warning: kernel '$(cat "$ROS_OSRELEASE" 2>/dev/null)' predates tmpfs noswap (Linux 6.4). $ros_dir stays a plain directory on /run's shared tmpfs, whose pages the kernel may swap; the swap check remains the only protection."
-    return 0
   fi
 
   # Moving from the old layout: a .env left in the plain directory sits on
@@ -513,45 +538,61 @@ ros_mount_secrets_dir() {
     ros_say "cannot create $ros_dir. Refusing; nothing was written to it."
     return 1
   fi
-  if ! ros_mount_noswap "$ros_dir"; then
+
+  if ros_kernel_has_tmpfs_noswap; then
+    if ros_mount_noswap "$ros_dir"; then
+      if ! ros_mounts_at "$ros_dir" || [ "$ros_mcount" -ne 1 ] ||
+         [ "$ros_mfs" != tmpfs ] || ! ros_has_opt noswap "$ros_mopts"; then
+        ros_umount "$ros_dir" 2>/dev/null || true
+        ros_say "the new tmpfs on $ros_dir does not report noswap in $ROS_MOUNTINFO. Unmounted it again. Refusing; nothing was written to it."
+        return 1
+      fi
+      ros_info "mounted a noswap tmpfs on $ros_dir."
+      return 0
+    fi
     if ! ros_mounts_at "$ros_dir" || [ "$ros_mcount" -ne 0 ]; then
       ros_say "mount failed but something is mounted at $ros_dir now. Refusing; nothing was written to it."
       return 1
     fi
-    ros_say "warning: could not mount a noswap tmpfs on $ros_dir (see mount's error above). It stays a plain directory on /run's shared tmpfs, whose pages the kernel may swap; the swap check remains the only protection."
+    ros_say "warning: could not mount a noswap tmpfs on $ros_dir (see mount's error above). Trying ramfs instead."
+  else
+    ros_info "kernel '$(cat "$ROS_OSRELEASE" 2>/dev/null)' predates tmpfs noswap (Linux 6.4); using ramfs for $ros_dir instead."
+  fi
+
+  if ros_mount_ramfs "$ros_dir"; then
+    if ! ros_mounts_at "$ros_dir" || [ "$ros_mcount" -ne 1 ] || [ "$ros_mfs" != ramfs ]; then
+      ros_umount "$ros_dir" 2>/dev/null || true
+      ros_say "the new ramfs on $ros_dir does not show up as ramfs in $ROS_MOUNTINFO. Unmounted it again. Refusing; nothing was written to it."
+      return 1
+    fi
+    ros_info "mounted a ramfs on $ros_dir (never swapped)."
     return 0
   fi
-  if ! ros_mounts_at "$ros_dir" || [ "$ros_mcount" -ne 1 ] ||
-     [ "$ros_mfs" != tmpfs ] || ! ros_has_opt noswap "$ros_mopts"; then
-    ros_umount "$ros_dir" 2>/dev/null || true
-    ros_say "the new tmpfs on $ros_dir does not report noswap in $ROS_MOUNTINFO. Unmounted it again. Refusing; nothing was written to it."
+  if ! ros_mounts_at "$ros_dir" || [ "$ros_mcount" -ne 0 ]; then
+    ros_say "mount failed but something is mounted at $ros_dir now. Refusing; nothing was written to it."
     return 1
   fi
-  ros_info "mounted a noswap tmpfs on $ros_dir."
+  ros_say "warning: could not mount a ramfs on $ros_dir either (see mount's error above). It stays a plain directory on /run's shared tmpfs, whose pages the kernel may swap; the swap check remains the only protection."
   return 0
 }
 
 # ros_noswap_status DIR: report, never refuse, whether DIR is a noswap
-# tmpfs. When the boot unit falls back to the plain directory, it says so
-# only in the journal; YOUR_APP-secrets-open and -commit call this, so the
-# fallback also shows up where the operator is looking.
+# tmpfs or a ramfs. When the boot unit falls back to the plain directory, it
+# says so only in the journal; YOUR_APP-secrets-open and -commit call this,
+# so the fallback also shows up where the operator is looking.
 ros_noswap_status() {
   if ! ros_mounts_at "$1"; then
-    ros_say "warning: cannot read $ROS_MOUNTINFO, so whether $1 is a noswap tmpfs is unknown."
+    ros_say "warning: cannot read $ROS_MOUNTINFO, so whether $1 is a noswap tmpfs or a ramfs is unknown."
     return 0
   fi
-  if [ "$ros_mcount" -eq 1 ] && [ "$ros_mfs" = tmpfs ] && ros_has_opt noswap "$ros_mopts"; then
-    ros_info "$1 is a noswap tmpfs."
+  if [ "$ros_mcount" -eq 1 ] && ros_unswappable_mount; then
+    ros_info "$1 is a $ros_mdesc."
     return 0
   fi
-  if [ "$ros_mcount" -eq 0 ] && ! ros_kernel_has_tmpfs_noswap; then
-    ros_info "$1 is a plain directory on /run; this kernel predates tmpfs noswap (Linux 6.4)."
-    return 0
-  fi
-  if ros_kernel_has_tmpfs_noswap; then
-    ros_say "warning: $1 is not a noswap tmpfs ($ros_mcount mount(s) there), although this kernel supports noswap. Files in it can be swapped out; while the swap check passes, only into zram. The journal of the unit that mounts it (journalctl -b) says why; restarting that unit tries the mount again."
+  if [ "$ros_mcount" -eq 0 ]; then
+    ros_say "warning: $1 is a plain directory on /run's shared tmpfs, neither a noswap tmpfs nor a ramfs. Files in it can be swapped out; while the swap check passes, only into zram. The journal of the unit that mounts it (journalctl -b) says why; restarting that unit tries the mount again."
   else
-    ros_say "warning: $1 has $ros_mcount mount(s) on it, none a noswap tmpfs; this kernel predates noswap (Linux 6.4). Files in it can be swapped out; while the swap check passes, only into zram."
+    ros_say "warning: $1 has $ros_mcount mount(s) on it, not a single noswap tmpfs or ramfs. Files in it can be swapped out; while the swap check passes, only into zram."
   fi
   return 0
 }
@@ -640,9 +681,20 @@ fi
 FAIL=0
 
 if ! command -v systemd-creds >/dev/null 2>&1; then
-  echo "MISSING: systemd-creds (part of the systemd package)" >&2
-  echo "  Debian/Ubuntu: sudo apt update && sudo apt install --only-upgrade systemd" >&2
-  echo "  Fedora/RHEL:   sudo dnf upgrade systemd" >&2
+  # systemd-creds and LoadCredentialEncrypted= arrived in systemd 250. Below
+  # that, a package upgrade within the same release does not get there.
+  SD_VER=$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')
+  if [ -n "$SD_VER" ] && [ "$SD_VER" -lt 250 ]; then
+    echo "MISSING: systemd-creds -- systemd $SD_VER found, 250 or newer required" >&2
+    echo "  (systemd-creds and LoadCredentialEncrypted=). Upgrading packages within" >&2
+    echo "  this release will not get there; upgrade the release itself:" >&2
+    echo "  Ubuntu 22.04: sudo do-release-upgrade   (to 24.04)" >&2
+    echo "  Debian 11:    upgrade to Debian 12 or 13 (see the Debian release notes)" >&2
+  else
+    echo "MISSING: systemd-creds (part of the systemd package)" >&2
+    echo "  Debian/Ubuntu: sudo apt update && sudo apt install --only-upgrade systemd" >&2
+    echo "  Fedora/RHEL:   sudo dnf upgrade systemd" >&2
+  fi
   FAIL=1
 fi
 
@@ -669,6 +721,39 @@ if [ -z "$APP_HOME" ] || [ ! -d "$APP_HOME" ]; then
   # paths become /.bash_history. /nonexistent must not exist (Debian policy).
   APP_HOME="${APP_HOME:-/nonexistent}"
 fi
+
+# --- group check begin ---
+# On a ramfs (kernel older than 6.4, or the noswap mount refused) the unit
+# keeps root as the owner of .env and lets group ${APP_USER} read it
+# (ros_mount_ramfs explains why), so there the application user reads its
+# secrets through that group. On a noswap tmpfs .env stays owned by
+# ${APP_USER}, mode 0600, as before.
+# The unit passes -g ${APP_USER} to install on every kernel, so without
+# that group it could never write .env.
+if ! getent group "$APP_USER" >/dev/null; then
+  echo "MISSING: a group named '$APP_USER'. The unit gives /run/${APP}-secrets to that group, on every kernel." >&2
+  echo "Create it and add the user (groupadd $APP_USER; usermod -aG $APP_USER $APP_USER), then log that user out and in again or restart user@${APP_UID}.service, and re-run this script. Nothing has been changed yet." >&2
+  exit 1
+fi
+if ! id "$APP_USER" >/dev/null 2>&1; then
+  echo "Warning: user '$APP_USER' does not exist yet, so its membership in group '$APP_USER' cannot be checked." >&2
+elif ! id -Gn "$APP_USER" | tr ' ' '\n' | grep -qxF -- "$APP_USER"; then
+  if ! ros_kernel_has_tmpfs_noswap; then
+    echo "This kernel predates tmpfs noswap, so .env will live on a ramfs, owned by root and readable only by group '$APP_USER' -- but '$APP_USER' is not a member of that group." >&2
+    echo "Add it (usermod -aG $APP_USER $APP_USER), then log that user out and in again or restart user@${APP_UID}.service, and re-run this script. Nothing has been changed yet." >&2
+    exit 1
+  fi
+  echo "Warning: '$APP_USER' is not a member of group '$APP_USER'. Fine on this kernel (.env on a noswap tmpfs belongs to '$APP_USER'), but should the noswap mount ever be refused, the ramfs fallback makes .env readable only through that group." >&2
+fi
+# Where .env lands on a ramfs, every other account in that group can read it.
+if getent group "$APP_USER" >/dev/null; then
+  ROS_GID=$(getent group "$APP_USER" | cut -d: -f3)
+  ROS_OTHERS=$( { getent group "$APP_USER" | cut -d: -f4 | tr ',' '\n'; getent passwd | awk -F: -v g="$ROS_GID" '$4 == g {print $1}'; } | grep -vxF -- "$APP_USER" | sort -u | tr '\n' ' ')
+  if [ -n "${ROS_OTHERS# }" ]; then
+    echo "Warning: group '$APP_USER' also contains: $ROS_OTHERS. Where .env lands on a ramfs (kernel older than 6.4), they can read it too." >&2
+  fi
+fi
+# --- group check end ---
 
 echo "Prerequisites OK:"
 systemctl --version | head -1
@@ -699,7 +784,7 @@ echo "Installed $GUARD"
 cat > "/usr/local/sbin/${APP}-secrets-open" <<SCRIPT_EOF
 #!/bin/sh
 # Prepares an editable plaintext copy of the current secrets bundle in RAM,
-# on a noswap tmpfs of its own where the kernel supports it.
+# on a noswap tmpfs of its own, or a ramfs where noswap is unavailable.
 set -eu
 umask 077
 
@@ -747,8 +832,9 @@ if [ -f "\$EDIT_FILE" ]; then
 fi
 
 # The edit copy gets what the .env gets: its own root-only tmpfs with
-# noswap (documentation/COMPONENTS.md Section 4.4). Where noswap is not
-# available, the guard warns and this stays a root-only directory on /run.
+# noswap, or a ramfs where that is unavailable (documentation/COMPONENTS.md
+# Section 4.4). Only if both mounts are refused, the guard warns and this
+# stays a root-only directory on /run.
 "\$GUARD" mount "\$EDIT_DIR" || exit 1
 install -d -m 0700 "\$EDIT_DIR"
 
@@ -902,12 +988,16 @@ CoredumpFilter=0
 # guarantee broken. (systemd has already decrypted the credential by then,
 # into its own credentials directory on a noswap tmpfs or ramfs.)
 ExecStartPre=/usr/local/sbin/${APP}-secrets-guard check
-# Give /run/${APP}-secrets its own tmpfs with "noswap" (Linux >= 6.4), so the
-# decrypted file can never be paged out, whatever swap is switched on later.
-# Reused as is on restart; where noswap is unavailable it warns and keeps
-# the plain directory.
+# Give /run/${APP}-secrets its own tmpfs with "noswap" (Linux >= 6.4), or a
+# ramfs where that is unavailable, so the decrypted file can never be paged
+# out, whatever swap is switched on later. Reused as is on restart; only if
+# both mounts are refused it warns and keeps the plain directory.
 ExecStart=/usr/local/sbin/${APP}-secrets-guard mount /run/${APP}-secrets
-ExecStart=/bin/sh -c 'install -d -m 0750 -o ${APP_USER} -g ${APP_USER} /run/${APP}-secrets && install -m 0600 -o ${APP_USER} -g ${APP_USER} "\$CREDENTIALS_DIRECTORY/${APP}-env" /run/${APP}-secrets/.env'
+# On a noswap tmpfs (capped at 2 MiB) the directory and .env go to
+# ${APP_USER}, 0750 and 0600, as always. On a ramfs, which has no size
+# limit, root keeps both and ${APP_USER} reads .env through its group
+# (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
+ExecStart=/bin/sh -c 'o=${APP_USER} m=0600; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/${APP}-secrets .* - ramfs " /proc/self/mountinfo; then o=root m=0440; fi; install -d -m 0750 -o \$o -g ${APP_USER} /run/${APP}-secrets && install -m \$m -o \$o -g ${APP_USER} "\$CREDENTIALS_DIRECTORY/${APP}-env" /run/${APP}-secrets/.env'
 ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "${APP_HOME}/.bash_history" "${APP_HOME}/.zsh_history"; do [ -e "\$f" ] && : > "\$f"; done; true'
 ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$i" ] && ! git -C "\$(dirname "\$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "\$i"; fi; true'
 

@@ -9,9 +9,9 @@
 # How it fakes a host without root: it cuts the ros-lib block out of the
 # installer with the same sed expression the installer uses to generate
 # /usr/local/sbin/YOUR_APP-secrets-guard, loads it, points the seven ROS_*
-# path variables at a fixture tree, and replaces the five root-only
+# path variables at a fixture tree, and replaces the six root-only
 # wrappers (ros_is_blockdev, ros_stat_devnum, ros_mount_noswap,
-# ros_umount, ros_same_mount_ns) plus ros_pause. Everything else runs
+# ros_mount_ramfs, ros_umount, ros_same_mount_ns) plus ros_pause. Everything else runs
 # exactly as shipped. A fake device node is a regular file with a
 # NODE.devnum sidecar holding "MAJOR MINOR" in hex, the way stat -c
 # '%t %T' prints it.
@@ -112,6 +112,18 @@ ros_mount_noswap() {
       echo "99 25 0:77 / $1 rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64,noswap" >> "$ROS_MOUNTINFO" ;;
     nonoswap)
       echo "99 25 0:77 / $1 rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64" >> "$ROS_MOUNTINFO" ;;
+    fail)
+      echo "mount: $1: permission denied." >&2
+      return 32 ;;
+  esac
+}
+FAKE_RAMFS=ok
+ros_mount_ramfs() {
+  case $FAKE_RAMFS in
+    ok)
+      echo "98 25 0:76 / $1 rw,nosuid,nodev,noexec,relatime shared:8 - ramfs ramfs rw,mode=700" >> "$ROS_MOUNTINFO" ;;
+    wrongfs)
+      echo "98 25 0:76 / $1 rw,nosuid,nodev,noexec,relatime shared:8 - tmpfs tmpfs rw,mode=700" >> "$ROS_MOUNTINFO" ;;
     fail)
       echo "mount: $1: permission denied." >&2
       return 32 ;;
@@ -402,10 +414,14 @@ t "migration from the plain-directory layout" 0 "*mounted a noswap tmpfs*" ros_m
 expect "migration: old .env on /run's shared tmpfs is deleted first" [ ! -e "$D/.env" ]
 
 reset; echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=1024k,inode64" >> "$ROS_MOUNTINFO"
-t "existing tmpfs without noswap is refused" 1 "*not a noswap tmpfs*nothing was written*" ros_mount_secrets_dir "$D"
+t "existing tmpfs without noswap is refused" 1 "*neither a noswap tmpfs nor a ramfs*nothing was written*" ros_mount_secrets_dir "$D"
 
 reset; echo "90 25 8:1 / $D rw,relatime shared:44 - ext4 /dev/sda1 rw" >> "$ROS_MOUNTINFO"
-t "existing ext4 mount is refused" 1 "*[(]ext4: rw[)] but not a noswap tmpfs*" ros_mount_secrets_dir "$D"
+t "existing ext4 mount is refused" 1 "*[(]ext4: rw[)] but neither a noswap tmpfs nor a ramfs*" ros_mount_secrets_dir "$D"
+
+reset; echo "90 25 0:50 / $D rw,relatime shared:44 - ramfs ramfs rw,mode=700" >> "$ROS_MOUNTINFO"
+t "existing ramfs is reused on 7.0 too" 0 "*already a ramfs; reusing it*" ros_mount_secrets_dir "$D"
+expect "existing ramfs: nothing stacked" [ "$(lines_at "$D")" = 1 ]
 
 reset
 echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=2048k,inode64,noswap" >> "$ROS_MOUNTINFO"
@@ -417,15 +433,33 @@ FAKE_MOUNT=ok
 t "a noswap tmpfs at a similar path does not count" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
 
 reset; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"; mkdir -p "$D"; echo 'OLD=x' > "$D/.env"
-t "kernel 6.1: warn, keep plain directory" 0 "*predates tmpfs noswap*" ros_mount_secrets_dir "$D"
-expect "kernel 6.1: nothing mounted" [ "$(lines_at "$D")" = 0 ]
+t "kernel 6.1: mounts a ramfs instead" 0 "*predates tmpfs noswap*using ramfs*mounted a ramfs on*" ros_mount_secrets_dir "$D"
+expect "kernel 6.1: exactly one mount at the directory" [ "$(lines_at "$D")" = 1 ]
+expect "kernel 6.1: the mount is a ramfs" grep -qF " $D rw,nosuid,nodev,noexec,relatime shared:8 - ramfs " "$ROS_MOUNTINFO"
+expect "kernel 6.1: old .env on /run's shared tmpfs is deleted first" [ ! -e "$D/.env" ]
+t "kernel 6.1: restart reuses the ramfs" 0 "*already a ramfs; reusing it*" ros_mount_secrets_dir "$D"
+expect "kernel 6.1 restart: still exactly one mount" [ "$(lines_at "$D")" = 1 ]
 
 reset; zram 0 none; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"
-t "kernel 6.1 with zram swap: warn, keep plain directory (R9)" 0 "*predates tmpfs noswap*" ros_mount_secrets_dir "$D"
+t "kernel 6.1 with zram swap: ramfs (R9)" 0 "*mounted a ramfs on*" ros_mount_secrets_dir "$D"
+
+reset; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"; FAKE_RAMFS=fail
+t "kernel 6.1, ramfs refused: warn, plain directory" 0 "*permission denied*could not mount a ramfs*either*plain directory*" ros_mount_secrets_dir "$D"
+expect "kernel 6.1, ramfs refused: nothing mounted" [ "$(lines_at "$D")" = 0 ]
+FAKE_RAMFS=ok
 
 reset; FAKE_MOUNT=fail
-t "mount refused (e.g. unprivileged container): warn, plain directory" 0 "*permission denied*could not mount a noswap tmpfs*" ros_mount_secrets_dir "$D"
-expect "mount refused: nothing mounted" [ "$(lines_at "$D")" = 0 ]
+t "noswap mount refused: falls back to ramfs" 0 "*permission denied*could not mount a noswap tmpfs*Trying ramfs*mounted a ramfs on*" ros_mount_secrets_dir "$D"
+expect "noswap mount refused: exactly one mount (the ramfs)" [ "$(lines_at "$D")" = 1 ]
+
+reset; FAKE_MOUNT=fail; FAKE_RAMFS=fail
+t "both mounts refused (e.g. unprivileged container): warn, plain directory" 0 "*could not mount a noswap tmpfs*could not mount a ramfs*either*plain directory*" ros_mount_secrets_dir "$D"
+expect "both mounts refused: nothing mounted" [ "$(lines_at "$D")" = 0 ]
+
+reset; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"; FAKE_RAMFS=wrongfs
+t "ramfs mount that shows up as something else is refused" 1 "*does not show up as ramfs*Unmounted*" ros_mount_secrets_dir "$D"
+expect "wrong filesystem: it was unmounted again" [ "$(lines_at "$D")" = 0 ]
+FAKE_MOUNT=ok; FAKE_RAMFS=ok
 
 reset; FAKE_MOUNT=nonoswap
 t "mount without noswap in mountinfo is refused" 1 "*does not report noswap*Unmounted*" ros_mount_secrets_dir "$D"
@@ -445,14 +479,19 @@ echo "# status (warns, never refuses)"
 reset; FAKE_MOUNT=ok; ros_mount_secrets_dir "$D" > /dev/null 2>&1
 t "status: noswap tmpfs" 0 "*is a noswap tmpfs.*" ros_noswap_status "$D"
 reset; mkdir -p "$D"
-t "status: plain directory on 7.0 warns" 0 "*warning:*not a noswap tmpfs*" ros_noswap_status "$D"
+t "status: plain directory on 7.0 warns" 0 "*warning:*plain directory*neither a noswap tmpfs nor a ramfs*" ros_noswap_status "$D"
 reset; echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=1024k,inode64" >> "$ROS_MOUNTINFO"
-t "status: tmpfs without noswap warns" 0 "*warning:*not a noswap tmpfs*" ros_noswap_status "$D"
+t "status: tmpfs without noswap warns" 0 "*warning:*not a single noswap tmpfs or ramfs*" ros_noswap_status "$D"
+reset; echo "90 25 0:50 / $D rw,relatime shared:44 - ramfs ramfs rw,mode=700" >> "$ROS_MOUNTINFO"
+t "status: ramfs on 7.0" 0 "*is a ramfs.*" ros_noswap_status "$D"
+t "status: ramfs does not warn" 0 "!*warning*" ros_noswap_status "$D"
 reset; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"; mkdir -p "$D"
-t "status: plain directory on 6.1 is expected" 0 "!*warning*" ros_noswap_status "$D"
+t "status: plain directory on 6.1 warns (a ramfs was expected)" 0 "*warning:*plain directory*" ros_noswap_status "$D"
+reset; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"; ros_mount_secrets_dir "$D" > /dev/null 2>&1
+t "status: ramfs on 6.1" 0 "*is a ramfs.*" ros_noswap_status "$D"
 reset; echo 6.1.0-40-amd64 > "$ROS_OSRELEASE"
 echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=1024k,inode64" >> "$ROS_MOUNTINFO"
-t "status: foreign mount on 6.1 warns without claiming noswap support" 0 "*warning:*predates noswap*" ros_noswap_status "$D"
+t "status: foreign mount on 6.1 warns" 0 "*warning:*not a single noswap tmpfs or ramfs*" ros_noswap_status "$D"
 if is_root; then
   skipped "status: unreadable mountinfo warns" "root can read mode 000"
 else
@@ -496,6 +535,7 @@ expect "lib reads no ROS_* path from the environment" \
   not_grep '[$]{ROS_' "$T/lib.sh"
 # The mount wrapper is replaced above, so check its option string here.
 expect "the real mount asks for noswap" grep -q 'mount -t tmpfs -o noswap,' "$T/lib.sh"
+expect "the real fallback mounts a root-only ramfs" grep -qF 'mount -t ramfs -o mode=0700,nosuid,nodev,noexec ramfs' "$T/lib.sh"
 expect "the real namespace check compares with PID 1" grep -qF 'readlink /proc/1/ns/mnt' "$T/lib.sh"
 expect "the real namespace check compares both links" \
   grep -qF '[ -n "$ros_ns_self" ] && [ "$ros_ns_self" = "$ros_ns_init" ]' "$T/lib.sh"
@@ -594,9 +634,25 @@ expect "unit runs the guard as ExecStartPre" \
   grep -qx 'ExecStartPre=/usr/local/sbin/myapp-secrets-guard check' "$T/unit"
 expect "unit mounts the noswap tmpfs before writing .env" \
   line_before "$T/unit" '^ExecStart=/usr/local/sbin/myapp-secrets-guard mount /run/myapp-secrets$' \
-                        '^ExecStart=/bin/sh -c .install -d '
+                        '^ExecStart=/bin/sh -c .o='
 # Settings that give a unit its own mount namespace (systemd v259
 # src/core/execute.c:259-346, exec_needs_mount_namespace()).
+# The unit's ownership step, run against fixture mountinfo lines with
+# install replaced by echo: app user 0600 on a noswap tmpfs, root with
+# group read (0440) on a ramfs.
+sed -n "s|^ExecStart=/bin/sh -c '\(o=.*\)'\$|\1|p" "$T/unit" |
+  sed -e "s|/proc/self/mountinfo|$T/own.mountinfo|" -e 's/install /echo install /g' > "$T/own.sh"
+expect "unit has exactly one ownership step" [ "$(grep -c . "$T/own.sh")" = 1 ]
+echo "99 25 0:77 / /run/myapp-secrets rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64,noswap" > "$T/own.mountinfo"
+t "unit on a noswap tmpfs: .env owned by the app user, 0600" 0 \
+  "*install -d -m 0750 -o myuser -g myuser /run/myapp-secrets*install -m 0600 -o myuser -g myuser *" sh "$T/own.sh"
+echo "98 25 0:76 / /run/myapp-secrets rw,nosuid,nodev,noexec,relatime shared:8 - ramfs ramfs rw,mode=700" > "$T/own.mountinfo"
+t "unit on a ramfs: root owns .env, group may read, 0440" 0 \
+  "*install -d -m 0750 -o root -g myuser /run/myapp-secrets*install -m 0440 -o root -g myuser *" sh "$T/own.sh"
+echo "98 25 0:76 / /run/myapp-secrets-edit rw,relatime shared:8 - ramfs ramfs rw,mode=700" > "$T/own.mountinfo"
+t "unit: a ramfs at another path does not count" 0 "*install -m 0600 -o myuser *" sh "$T/own.sh"
+: > "$T/own.mountinfo"
+t "unit on a plain directory: app user, 0600" 0 "*install -m 0600 -o myuser *" sh "$T/own.sh"
 expect "unit has no private mount namespace (the mount must reach the host)" \
   not_grep -E '^(PrivateMounts|ProtectSystem|ProtectHome|PrivateTmp|PrivateDevices|PrivateIPC|PrivateNetwork|PrivatePIDs|NetworkNamespacePath|IPCNamespacePath|TemporaryFileSystem|RuntimeDirectory|StateDirectory|CacheDirectory|LogsDirectory|ConfigurationDirectory|ReadOnlyPaths|ReadWritePaths|InaccessiblePaths|ExecPaths|NoExecPaths|BindPaths|BindReadOnlyPaths|MountImages|ExtensionImages|ExtensionDirectories|RootDirectory|RootImage|ProtectKernelTunables|ProtectKernelModules|ProtectKernelLogs|ProtectControlGroups|ProtectClock|ProtectHostname|ProtectProc|ProcSubset|MountFlags|MountAPIVFS|BPFFilesystem|PrivateUsers)=' "$T/unit"
 expect "no copy of the old 'wc -l < /proc/swaps' test is left" \
@@ -611,6 +667,64 @@ expect "installer unmounts the edit tmpfs without dying on the fallback" \
   grep -qxF 'umount "$EDIT_DIR" 2>/dev/null || true' "$INSTALLER"
 expect "rendered guard documents all three subcommands" \
   grep -qF '# Usage: YOUR_APP-secrets-guard check | YOUR_APP-secrets-guard mount DIRECTORY | YOUR_APP-secrets-guard status DIRECTORY' "$T/guard"
+
+echo "# installer: systemd without systemd-creds"
+
+# The installer's systemd-creds check, run with a fake systemctl and a PATH
+# that has no systemd-creds, prints the right advice for the version.
+awk '/^if ! command -v systemd-creds / {f=1} f {print} f && /^fi$/ {exit}' "$INSTALLER" > "$T/sdcreds.sh"
+mkdir -p "$T/sd249" "$T/sd255"
+SH=$(command -v sh)
+for v in 249 255; do
+  printf '#!/bin/sh\necho "systemd %s (%s.1-1)"\n' "$v" "$v" > "$T/sd$v/systemctl"
+  chmod 755 "$T/sd$v/systemctl"
+  ln -s "$(command -v sed)" "$T/sd$v/sed"
+done
+t "systemd 249: names the release upgrade, not a package upgrade" 0 \
+  "*systemd 249 found, 250 or newer required*do-release-upgrade*FAIL=1" \
+  env PATH="$T/sd249" "$SH" -c ". '$T/sdcreds.sh'; echo FAIL=\$FAIL"
+t "systemd 249: no --only-upgrade advice" 0 "!*only-upgrade*" \
+  env PATH="$T/sd249" "$SH" -c ". '$T/sdcreds.sh'; echo FAIL=\$FAIL"
+t "systemd 255 without systemd-creds: package advice" 0 "*MISSING: systemd-creds [(]part of the systemd package[)]*only-upgrade systemd*FAIL=1" \
+  env PATH="$T/sd255" "$SH" -c ". '$T/sdcreds.sh'; echo FAIL=\$FAIL"
+# The installer's group check, run with fake getent and id.
+awk '/^# --- group check begin ---$/ {f=1} f {print} /^# --- group check end ---$/ {exit}' "$INSTALLER" > "$T/group.sh"
+expect "installer has a group check block" grep -q 'id -Gn "[$]APP_USER"' "$T/group.sh"
+G=$T/gbin; mkdir -p "$G"
+for tool in tr grep cut sort awk; do ln -s "$(command -v "$tool")" "$G/$tool"; done
+cat > "$G/getent" <<'EOF'
+#!/bin/sh
+case "$1" in
+  group) [ -n "$FAKE_GROUP" ] || exit 2; echo "$FAKE_GROUP" ;;
+  passwd) printf '%s\n' "$FAKE_PASSWD" ;;
+esac
+EOF
+cat > "$G/id" <<'EOF'
+#!/bin/sh
+[ "$FAKE_USER_EXISTS" = 1 ] || exit 1
+if [ "$1" = -Gn ]; then echo "$FAKE_GROUPS"; fi
+EOF
+chmod 755 "$G/getent" "$G/id"
+# gcheck NOSWAP(0|1) GROUPLINE USER_EXISTS GROUPS PASSWD
+gcheck() {
+  env PATH="$G" FAKE_GROUP="$2" FAKE_USER_EXISTS="$3" FAKE_GROUPS="$4" FAKE_PASSWD="$5" "$SH" -c \
+    "set -eu; APP=myapp APP_USER=myuser APP_UID=1001; ros_kernel_has_tmpfs_noswap() { [ $1 = 1 ]; }; . '$T/group.sh'; echo GROUP-CHECK-PASSED"
+}
+t "group check: member of its own group, no warning" 0 "GROUP-CHECK-PASSED" \
+  gcheck 1 "myuser:x:1001:" 1 "myuser" "myuser:x:1001:1001::/home/myuser:/bin/sh"
+t "group check: no such group refuses, even with noswap (install -g needs it)" 1 "*MISSING: a group named 'myuser'*on every kernel*Nothing has been changed yet.*" \
+  gcheck 1 "" 1 "users" ""
+t "group check: no such group on an old kernel refuses" 1 "*MISSING: a group named 'myuser'*Nothing has been changed yet.*" \
+  gcheck 0 "" 1 "users" ""
+t "group check: not a member on a noswap kernel warns, goes on" 0 "*Warning: 'myuser' is not a member*GROUP-CHECK-PASSED" \
+  gcheck 1 "myuser:x:1001:" 1 "users docker" ""
+t "group check: not a member on an old kernel refuses, says to re-login" 1 "*not a member of that group*user@1001.service*" \
+  gcheck 0 "myuser:x:1001:" 1 "users docker" ""
+t "group check: user not created yet warns, goes on" 0 "*does not exist yet*GROUP-CHECK-PASSED" \
+  gcheck 0 "myuser:x:1001:" 0 "" ""
+t "group check: other members are named" 0 "*also contains: nginx www-data*GROUP-CHECK-PASSED" \
+  gcheck 1 "myuser:x:1001:www-data,myuser" 1 "myuser" "myuser:x:1001:1001::/home/myuser:/bin/sh
+nginx:x:990:1001::/var/lib/nginx:/usr/sbin/nologin"
 
 echo "# syntax and lint"
 

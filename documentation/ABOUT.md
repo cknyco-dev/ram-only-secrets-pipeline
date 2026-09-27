@@ -62,10 +62,10 @@ A two-stage secrets pipeline:
   On Linux 6.4 and later, the decrypted file also gets a tmpfs of its own,
   mounted with `noswap`, so the kernel won't page it out even to a swap
   device switched on after the check ran. The plaintext copy used during
-  an edit gets the same kind of mount. Where that isn't available (an
-  older kernel, or a container that refuses the mount), the unit warns and
-  keeps the plain directory on `/run`, the layout this pipeline always
-  used. zram swap is still accepted there: swapping into zram keeps pages
+  an edit gets the same kind of mount. On older kernels both get a ramfs
+  instead, which the kernel never swaps either. Only where that is refused
+  too (a container, for example) the unit warns and keeps the plain
+  directory on `/run`, the layout this pipeline always used. zram swap is still accepted there: swapping into zram keeps pages
   in RAM, so the `noswap` mount is defense in depth, not the gate.
 
   `vm.swappiness=0` is not an acceptable substitute for any of this. It
@@ -95,7 +95,7 @@ plaintext secrets (root, one-time)
 /etc/credstore.encrypted/YOUR_APP-env      -- ciphertext, persistent disk, safe to leave here
     |  read at boot by YOUR_APP-secrets.service, via LoadCredentialEncrypted=
     v
-/run/YOUR_APP-secrets/.env                 -- plaintext, own noswap tmpfs (RAM), mode 0600, owned YOUR_APP_USER
+/run/YOUR_APP-secrets/.env                 -- plaintext, own noswap tmpfs (0600, YOUR_APP_USER) or ramfs (0440, root:YOUR_APP_USER)
     |  symlinked from the app's own working directory
     v
 YOUR_APP_DIR/.env  ->  /run/YOUR_APP-secrets/.env

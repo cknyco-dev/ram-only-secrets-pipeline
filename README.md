@@ -78,7 +78,7 @@ plaintext secrets (root, one-time)
 /etc/credstore.encrypted/YOUR_APP-env      -- ciphertext, persistent disk, safe to leave here
     |  read at boot by YOUR_APP-secrets.service, via LoadCredentialEncrypted=
     v
-/run/YOUR_APP-secrets/.env                 -- plaintext, own noswap tmpfs (RAM), mode 0600, owned YOUR_APP_USER
+/run/YOUR_APP-secrets/.env                 -- plaintext, own noswap tmpfs (0600, YOUR_APP_USER) or ramfs (0440, root:YOUR_APP_USER)
     |  symlinked from the app's own working directory
     v
 YOUR_APP_DIR/.env  ->  /run/YOUR_APP-secrets/.env
@@ -115,10 +115,19 @@ unit, the env-file symlink, and the two helper scripts in full — in
   helper scripts.
 - **Linux 6.4 or later recommended**, so the decrypted file and the
   edit copy each get a tmpfs of their own mounted with `noswap` (Ubuntu
-  24.04, Debian 13 and Ubuntu 26.04 all qualify). Older kernels keep plain
-  directories on `/run`, with a warning.
+  24.04, Debian 13 and Ubuntu 26.04 all qualify). Older kernels (Debian
+  12's 6.1, for example) get a ramfs instead, which is never swapped
+  either; only if that mount is refused too, a plain directory on `/run`,
+  with a warning.
 - Linux with **systemd ≥ 250** (`systemd-creds` availability; ≥ 259
-  recommended for the full feature set this pipeline uses).
+  recommended for the full feature set this pipeline uses). Ubuntu 22.04
+  ships 249 and Debian 11 ships 247; the installer refuses both, and a
+  package upgrade within those releases does not help. Upgrade the release
+  instead: `do-release-upgrade` to Ubuntu 24.04, or Debian 12 or 13.
+- On kernels older than 6.4, the application user must be a member of a
+  group with the same name (the default for users made by
+  `adduser`/`useradd`): on a ramfs, `.env` belongs to root and is readable
+  by that group (`documentation/COMPONENTS.md` Section 4.2).
 - Standard coreutils: `shred`, `base64`, `sha256sum`, `install`, `stat`,
   `readlink`, plus `getent` (from glibc; package `libc-bin` on Debian and
   Ubuntu) and `nano`. GNU coreutils and the Rust uutils that Ubuntu 26.04

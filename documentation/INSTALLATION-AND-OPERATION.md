@@ -113,9 +113,14 @@ systemd-creds has-tpm2 || echo "no TPM2 -- host-only key will be used, which is 
 which shred base64 sha256sum install stat readlink getent nano
 ```
 
-If `systemd-creds` is missing entirely, or `systemctl --version` reports
-something clearly old, update the `systemd` package itself (it's not a
-separate install — `systemd-creds` comes bundled with it):
+`systemd-creds` needs systemd 250 or newer. Ubuntu 22.04 (systemd 249)
+and Debian 11 (247) are older, and no package update within those
+releases changes that: upgrade the release itself (`sudo
+do-release-upgrade` to Ubuntu 24.04, or to Debian 12 or 13). The
+installer says the same when it finds such a version. On a supported
+release where `systemd-creds` is missing anyway, update the `systemd`
+package itself (it's not a separate install — `systemd-creds` comes
+bundled with it):
 
 ```bash
 # Debian / Ubuntu
@@ -188,7 +193,7 @@ nano /run/YOUR_APP-secrets-edit/env.edit
 (umask 077; systemd-creds encrypt --name=YOUR_APP-env /run/YOUR_APP-secrets-edit/env.edit /etc/credstore.encrypted/YOUR_APP-env)
 shred -u /run/YOUR_APP-secrets-edit/env.edit
 umount /run/YOUR_APP-secrets-edit; rmdir /run/YOUR_APP-secrets-edit
-# (umount fails harmlessly where the guard kept a plain directory)
+# (umount fails harmlessly where both mounts were refused and it stayed a plain directory)
 
 # 5. Enable and start the unit -- this performs the first decrypt into RAM.
 systemctl daemon-reload
@@ -197,12 +202,14 @@ systemctl enable --now YOUR_APP-secrets.service
 # 6. Verify.
 systemctl status YOUR_APP-secrets.service
 ls -l /run/YOUR_APP-secrets/.env
-# expect: -rw------- YOUR_APP_USER YOUR_APP_USER
+# expect: -rw------- YOUR_APP_USER YOUR_APP_USER   (noswap tmpfs)
+#     or: -r--r----- root YOUR_APP_USER            (ramfs, kernel older than 6.4)
 grep -c '=' /run/YOUR_APP-secrets/.env
 # sanity-check the line count only -- do not print values
 /usr/local/sbin/YOUR_APP-secrets-guard status /run/YOUR_APP-secrets
-# expect on Linux 6.4+: "... is a noswap tmpfs." A warning means it stayed
-# a plain directory; journalctl -u YOUR_APP-secrets.service says why.
+# expect on Linux 6.4+: "... is a noswap tmpfs.", on older kernels
+# "... is a ramfs." A warning means it stayed a plain directory;
+# journalctl -u YOUR_APP-secrets.service says why.
 
 # 7. Take the FIRST backup now, the same way every later commit prints one.
 sha256sum /etc/credstore.encrypted/YOUR_APP-env
@@ -252,7 +259,8 @@ ln -s /run/YOUR_APP-secrets/.env YOUR_APP_DIR/.env
       kdump is still off if zram swap is on. Required, not optional -- see
       `documentation/ABOUT.md` Section 2.
 - [ ] On Linux 6.4 or later, `findmnt /run/YOUR_APP-secrets` shows a
-      `tmpfs` with `noswap` among its options.
+      `tmpfs` with `noswap` among its options; on older kernels, a
+      `ramfs`.
 - [ ] Confirm `/etc/credstore.encrypted/YOUR_APP-env` is unreadable as
       plaintext (`file /etc/credstore.encrypted/YOUR_APP-env` should report
       binary/opaque data, not text).
@@ -323,6 +331,11 @@ systemctl restart YOUR_APP-secrets.service
 
 On Linux 6.4 and later, where the mount is allowed, the restart deletes
 the old `.env` from `/run`'s shared tmpfs, mounts the new `noswap` tmpfs
-in its place and writes the file again inside it. Otherwise it warns and
-keeps the plain directory, and `status` says so. Switch zram swap on only
+in its place and writes the file again inside it; on older kernels it
+mounts a ramfs instead. Only if both are refused it warns and keeps the
+plain directory, and `status` says so. On a ramfs, `.env` belongs to
+root and is readable by the group `YOUR_APP_USER` (`-r--r----- root
+YOUR_APP_USER`), so there the application user must be a member of that
+group and the reading process must carry it (`documentation/COMPONENTS.md`
+Section 4.2). Switch zram swap on only
 after this, and only without a writeback device.
