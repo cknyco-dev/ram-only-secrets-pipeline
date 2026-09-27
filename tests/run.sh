@@ -606,7 +606,7 @@ for h in open commit; do
   expect "rendered -secrets-$h keeps the edit copy on the edit tmpfs" \
     grep -qx 'EDIT_FILE=/run/myapp-secrets-edit/env.edit' "$T/$h"
   expect "rendered -secrets-$h reports the .env's noswap status" \
-    grep -qxF '"$GUARD" status /run/myapp-secrets || true' "$T/$h"
+    grep -qxF '"$GUARD" status "/run/myapp-secrets" || true' "$T/$h"
 done
 expect "rendered -secrets-open mounts the edit tmpfs before copying" \
   line_before "$T/open" '^"[$]GUARD" mount "[$]EDIT_DIR" [|][|] exit 1$' '^  cp "[$]RUNNING_ENV"'
@@ -725,6 +725,27 @@ t "group check: user not created yet warns, goes on" 0 "*does not exist yet*GROU
 t "group check: other members are named" 0 "*also contains: nginx www-data*GROUP-CHECK-PASSED" \
   gcheck 1 "myuser:x:1001:www-data,myuser" 1 "myuser" "myuser:x:1001:1001::/home/myuser:/bin/sh
 nginx:x:990:1001::/var/lib/nginx:/usr/sbin/nologin"
+
+echo "# installer: accepted names"
+
+# The installer's name check, run on its own with sample arguments.
+awk '/^# --- name check begin ---$/ {f=1} f {print} /^# --- name check end ---$/ {exit}' "$INSTALLER" > "$T/names.sh"
+expect "installer has a name check block" grep -q 'APP_NAME .* is not accepted' "$T/names.sh"
+ncheck() { "$SH" -c "set -eu; APP=\$1 APP_USER=\$2; . '$T/names.sh'; echo NAMES-OK" ncheck "$@"; }
+t "names: myapp / myuser" 0 "NAMES-OK" ncheck myapp myuser
+t "names: paperclip / pcsbx with UID" 0 "NAMES-OK" ncheck paperclip pcsbx 1000
+t "names: dashes, dots, underscores" 0 "NAMES-OK" ncheck my-app_2 first.last_user-1
+t "names: app name with a space" 1 "*APP_NAME 'my app' is not accepted*" ncheck "my app" myuser
+t "names: app name with uppercase" 1 "*APP_NAME 'MyApp' is not accepted*" ncheck MyApp myuser
+t "names: app name with a percent sign (systemd specifier)" 1 "*APP_NAME 'a%nb' is not accepted*" ncheck 'a%nb' myuser
+t "names: app name starting with a dash" 1 "*not accepted*" ncheck -x myuser
+t "names: user with a dollar sign" 1 "*APP_USER 'u[$][(]id[)]' is not accepted*" ncheck myapp 'u$(id)'
+t "names: user with a quote" 1 "*APP_USER * is not accepted*" ncheck myapp "u'x"
+t "names: user with a semicolon" 1 "*not accepted*" ncheck myapp 'u;x'
+t "names: empty user" 1 "*not accepted*" ncheck myapp ''
+t "names: user longer than 32 characters" 1 "*at most 32*" ncheck myapp abcdefghijklmnopqrstuvwxyz0123456
+t "names: non-numeric UID" 1 "*UID '10a0' is not a number*" ncheck myapp myuser 10a0
+t "names: accented letter" 1 "*not accepted*" ncheck "caf$(printf '\303\251')" myuser
 
 echo "# syntax and lint"
 

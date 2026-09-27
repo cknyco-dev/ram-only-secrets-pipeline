@@ -70,6 +70,35 @@ esac
 
 APP="${1:?Usage: $0 APP_NAME APP_USER [UID]}"
 APP_USER="${2:?Usage: $0 APP_NAME APP_USER [UID]}"
+
+# --- name check begin ---
+# APP and APP_USER are copied verbatim into generated scripts, a systemd
+# unit (where % starts a specifier) and paths, so only characters that need
+# no quoting or escaping anywhere are accepted. Letters are spelled out
+# rather than written as a-z, which some locales stretch to other letters.
+case "$APP" in
+  ''|-*|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*)
+    echo "APP_NAME '$APP' is not accepted: use lowercase letters a-z, digits, '-' and '_', not starting with '-'. Nothing has been changed yet." >&2
+    exit 1 ;;
+esac
+case "$APP_USER" in
+  ''|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*)
+    echo "APP_USER '$APP_USER' is not accepted: use letters a-z or A-Z, digits, '.', '-' and '_', not starting with '-'. Nothing has been changed yet." >&2
+    exit 1 ;;
+esac
+if [ "${#APP}" -gt 64 ] || [ "${#APP_USER}" -gt 32 ]; then
+  echo "APP_NAME may have at most 64 characters, APP_USER at most 32. Nothing has been changed yet." >&2
+  exit 1
+fi
+if [ -n "${3:-}" ]; then
+  case "$3" in
+    *[!0123456789]*)
+      echo "UID '$3' is not a number. Nothing has been changed yet." >&2
+      exit 1 ;;
+  esac
+fi
+# --- name check end ---
+
 APP_UID="${3:-$(id -u "$APP_USER" 2>/dev/null || true)}"
 
 if [ -z "$APP_UID" ]; then
@@ -845,8 +874,9 @@ else
 fi
 chmod 600 "\$EDIT_FILE"
 
-# A warning, never a refusal, if the running .env is not on its noswap tmpfs.
-"\$GUARD" status /run/${APP}-secrets || true
+# A warning, never a refusal, if the running .env is on neither a noswap
+# tmpfs nor a ramfs.
+"\$GUARD" status "/run/${APP}-secrets" || true
 
 # Backstop cleanup: if a standalone copy of the installer is still sitting
 # at the standard path, and it is NOT part of a kept git checkout (Section
@@ -907,8 +937,8 @@ shred -u "\$EDIT_FILE"
 umount "\$EDIT_DIR" 2>/dev/null || true
 rmdir "\$EDIT_DIR" 2>/dev/null || true
 
-systemctl restart ${APP}-secrets.service
-"\$GUARD" status /run/${APP}-secrets || true
+systemctl restart "${APP}-secrets.service"
+"\$GUARD" status "/run/${APP}-secrets" || true
 
 # Same backstop cleanup as -secrets-open -- see the comment there.
 if [ -e "\$INSTALLER" ] && ! git -C "\$(dirname "\$INSTALLER")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -997,7 +1027,7 @@ ExecStart=/usr/local/sbin/${APP}-secrets-guard mount /run/${APP}-secrets
 # ${APP_USER}, 0750 and 0600, as always. On a ramfs, which has no size
 # limit, root keeps both and ${APP_USER} reads .env through its group
 # (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
-ExecStart=/bin/sh -c 'o=${APP_USER} m=0600; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/${APP}-secrets .* - ramfs " /proc/self/mountinfo; then o=root m=0440; fi; install -d -m 0750 -o \$o -g ${APP_USER} /run/${APP}-secrets && install -m \$m -o \$o -g ${APP_USER} "\$CREDENTIALS_DIRECTORY/${APP}-env" /run/${APP}-secrets/.env'
+ExecStart=/bin/sh -c 'o="${APP_USER}" m="0600"; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/${APP}-secrets .* - ramfs " /proc/self/mountinfo; then o="root" m="0440"; fi; install -d -m 0750 -o "\$o" -g "${APP_USER}" "/run/${APP}-secrets" && install -m "\$m" -o "\$o" -g "${APP_USER}" "\$CREDENTIALS_DIRECTORY/${APP}-env" "/run/${APP}-secrets/.env"'
 ExecStartPost=/bin/sh -c 'for f in "/root/.bash_history" "/root/.zsh_history" "${APP_HOME}/.bash_history" "${APP_HOME}/.zsh_history"; do [ -e "\$f" ] && : > "\$f"; done; true'
 ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$i" ] && ! git -C "\$(dirname "\$i")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -f "\$i"; fi; true'
 

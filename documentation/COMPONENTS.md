@@ -62,7 +62,7 @@ ExecStart=/usr/local/sbin/YOUR_APP-secrets-guard mount /run/YOUR_APP-secrets
 # YOUR_APP_USER, 0750 and 0600, as always. On a ramfs, which has no size
 # limit, root keeps both and YOUR_APP_USER reads .env through its group
 # (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
-ExecStart=/bin/sh -c 'o=YOUR_APP_USER m=0600; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/YOUR_APP-secrets .* - ramfs " /proc/self/mountinfo; then o=root m=0440; fi; install -d -m 0750 -o $o -g YOUR_APP_USER /run/YOUR_APP-secrets && install -m $m -o $o -g YOUR_APP_USER "$CREDENTIALS_DIRECTORY/YOUR_APP-env" /run/YOUR_APP-secrets/.env'
+ExecStart=/bin/sh -c 'o="YOUR_APP_USER" m="0600"; if grep -qE "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ /run/YOUR_APP-secrets .* - ramfs " /proc/self/mountinfo; then o="root" m="0440"; fi; install -d -m 0750 -o "$o" -g "YOUR_APP_USER" "/run/YOUR_APP-secrets" && install -m "$m" -o "$o" -g "YOUR_APP_USER" "$CREDENTIALS_DIRECTORY/YOUR_APP-env" "/run/YOUR_APP-secrets/.env"'
 # Boot-time history hygiene -- an automatic backstop, not a replacement for
 # the manual clear-history steps in Sections 5.2 and 5.3. See the
 # explanation right after this unit for what it does and does not cover.
@@ -404,8 +404,9 @@ else
 fi
 chmod 600 "$EDIT_FILE"
 
-# A warning, never a refusal, if the running .env is not on its noswap tmpfs.
-"$GUARD" status /run/YOUR_APP-secrets || true
+# A warning, never a refusal, if the running .env is on neither a noswap
+# tmpfs nor a ramfs.
+"$GUARD" status "/run/YOUR_APP-secrets" || true
 
 # Backstop cleanup: if a standalone copy of the installer is still sitting
 # at the standard path, and it is NOT part of a kept git checkout (Section
@@ -470,8 +471,8 @@ shred -u "$EDIT_FILE"
 umount "$EDIT_DIR" 2>/dev/null || true
 rmdir "$EDIT_DIR" 2>/dev/null || true
 
-systemctl restart YOUR_APP-secrets.service
-"$GUARD" status /run/YOUR_APP-secrets || true
+systemctl restart "YOUR_APP-secrets.service"
+"$GUARD" status "/run/YOUR_APP-secrets" || true
 
 # Same backstop cleanup as -secrets-open -- see the comment there.
 if [ -e "$INSTALLER" ] && ! git -C "$(dirname "$INSTALLER")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then

@@ -15,6 +15,10 @@ chmod +x ram-only-secrets-install.sh
 sudo ./ram-only-secrets-install.sh YOUR_APP YOUR_APP_USER
 # UID is auto-detected from YOUR_APP_USER; pass it as a 3rd argument only
 # if that lookup fails for some reason.
+# YOUR_APP: lowercase letters, digits, '-' and '_' (at most 64 characters).
+# YOUR_APP_USER: letters, digits, '.', '-' and '_' (at most 32). Both end up
+# verbatim in generated scripts and the systemd unit, so the installer
+# refuses anything else.
 ```
 
 **Read the script before you run it as root** — it's a genuinely small,
