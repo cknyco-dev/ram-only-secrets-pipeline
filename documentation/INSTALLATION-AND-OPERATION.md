@@ -107,9 +107,9 @@ which systemd-creds && systemd-creds --version
 # real hardware-backed option if you want it later.
 systemd-creds has-tpm2 || echo "no TPM2 -- host-only key will be used, which is what this pipeline assumes throughout"
 
-# The plain coreutils this pipeline relies on -- present on virtually
-# every Linux install already (GNU or Ubuntu 26.04's uutils), confirm
-# rather than assume:
+# The plain coreutils this pipeline relies on (GNU or Ubuntu 26.04's
+# uutils), plus getent (from glibc, package libc-bin) and nano -- present
+# on virtually every Linux install already, confirm rather than assume:
 which shred base64 sha256sum install stat readlink getent nano
 ```
 

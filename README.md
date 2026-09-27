@@ -120,8 +120,9 @@ unit, the env-file symlink, and the two helper scripts in full — in
 - Linux with **systemd ≥ 250** (`systemd-creds` availability; ≥ 259
   recommended for the full feature set this pipeline uses).
 - Standard coreutils: `shred`, `base64`, `sha256sum`, `install`, `stat`,
-  `readlink`, plus `nano`. GNU coreutils and the Rust uutils that Ubuntu
-  26.04 installs by default both work.
+  `readlink`, plus `getent` (from glibc; package `libc-bin` on Debian and
+  Ubuntu) and `nano`. GNU coreutils and the Rust uutils that Ubuntu 26.04
+  installs by default both work.
 - An unprivileged application user already created, and root/sudo access
   for the one-time setup.
 
