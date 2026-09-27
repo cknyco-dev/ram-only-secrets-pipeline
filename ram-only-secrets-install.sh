@@ -78,16 +78,6 @@ if [ -z "$APP_UID" ]; then
   exit 1
 fi
 
-# Home directory from the passwd database; no eval of the argument.
-APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
-if [ -z "$APP_HOME" ] || [ ! -d "$APP_HOME" ]; then
-  echo "Warning: resolved home directory '$APP_HOME' for '$APP_USER' does not exist." >&2
-  echo "The boot-time history-cleanup line will simply skip files under it -- harmless, but check APP_USER is right." >&2
-  # No passwd entry yet (UID given as 3rd argument): never let the cleanup
-  # paths become /.bash_history. /nonexistent must not exist (Debian policy).
-  APP_HOME="${APP_HOME:-/nonexistent}"
-fi
-
 # --- ros-lib begin ---
 # Swap-safety guard for the RAM-only secrets pipeline.
 #
@@ -666,6 +656,18 @@ done
 if [ "$FAIL" -ne 0 ]; then
   echo "Install what's missing above, then re-run this script. Nothing has been changed yet." >&2
   exit 1
+fi
+
+# Home directory from the passwd database; no eval of the argument. Resolved
+# only now, after the loop above has confirmed getent exists; nothing uses it
+# before the unit file is written.
+APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
+if [ -z "$APP_HOME" ] || [ ! -d "$APP_HOME" ]; then
+  echo "Warning: resolved home directory '$APP_HOME' for '$APP_USER' does not exist." >&2
+  echo "The boot-time history-cleanup line will simply skip files under it -- harmless, but check APP_USER is right." >&2
+  # No passwd entry yet (UID given as 3rd argument): never let the cleanup
+  # paths become /.bash_history. /nonexistent must not exist (Debian policy).
+  APP_HOME="${APP_HOME:-/nonexistent}"
 fi
 
 echo "Prerequisites OK:"
