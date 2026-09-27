@@ -17,9 +17,10 @@ created fresh at every boot and gone the moment the machine powers off or
 reboots.
 
 This is a **pattern**, not a hosted product: a systemd unit, two small
-shell helper scripts, one optional installer, and `systemd-creds` itself
-(bundled with systemd — nothing else to trust). Generic and app-agnostic —
-drop it in front of any app that reads a `.env` file.
+shell helper scripts, one shared swap guard, one optional installer, and
+`systemd-creds` itself (bundled with systemd — nothing else to trust).
+Generic and app-agnostic — drop it in front of any app that reads a
+`.env` file.
 
 ## Table of contents
 
@@ -37,9 +38,11 @@ drop it in front of any app that reads a `.env` file.
 
 ## Features
 
-- **No plaintext secrets on persistent disk, ever** — not in the `.env`
-  file your app reads, not in a backup snapshot, not in an editor swap
-  file left behind by accident.
+- **No plaintext secrets on persistent disk** — not in the `.env` file
+  your app reads, not in a backup snapshot, not in an editor swap file
+  left behind by accident. The limits of that promise (your
+  application's own memory, core dumps, the hypervisor) are listed in
+  [`documentation/COMPONENTS.md` §4.5](documentation/COMPONENTS.md#45-the-swap-guard-one-check-used-everywhere).
 - **Fresh by construction on every boot** — no stale plaintext copy to
   forget about; a reboot re-decrypts from the encrypted bundle, nothing
   more.
@@ -75,7 +78,7 @@ plaintext secrets (root, one-time)
 /etc/credstore.encrypted/YOUR_APP-env      -- ciphertext, persistent disk, safe to leave here
     |  read at boot by YOUR_APP-secrets.service, via LoadCredentialEncrypted=
     v
-/run/YOUR_APP-secrets/.env                 -- plaintext, tmpfs (RAM), mode 0600, owned YOUR_APP_USER
+/run/YOUR_APP-secrets/.env                 -- plaintext, own noswap tmpfs (0600, YOUR_APP_USER) or ramfs (0440, root:YOUR_APP_USER)
     |  symlinked from the app's own working directory
     v
 YOUR_APP_DIR/.env  ->  /run/YOUR_APP-secrets/.env
@@ -98,16 +101,37 @@ unit, the env-file symlink, and the two helper scripts in full — in
 
 ## Requirements
 
-- **No active swap anywhere on the host.** `tmpfs` (where the decrypted
-  `.env` file lives) is swappable like any other memory, so any active
-  swap defeats the RAM-only guarantee this pipeline exists to provide —
-  see [`documentation/ABOUT.md`](documentation/ABOUT.md#2-why-this-shape).
-  Checked automatically, with no override, everywhere this pipeline
-  touches the system: the installer, the boot service, and both helper
-  scripts.
+- **No swap that can reach disk.** `tmpfs` (where the decrypted `.env`
+  file lives) is swappable like any other memory, so a swap partition or
+  swap file defeats the RAM-only guarantee this pipeline exists to
+  provide. Swap on zram is the one exception, because zram keeps swapped
+  pages compressed in RAM: it is accepted when the zram device has no
+  writeback backing device and kdump is off. See
+  [`documentation/ABOUT.md`](documentation/ABOUT.md#2-why-this-shape) for
+  the reasoning and
+  [`documentation/COMPONENTS.md` §4.5](documentation/COMPONENTS.md#45-the-swap-guard-one-check-used-everywhere)
+  for each rule. Checked automatically, with no override, everywhere this
+  pipeline touches the system: the installer, the boot service, and both
+  helper scripts.
+- **Linux 6.4 or later recommended**, so the decrypted file and the
+  edit copy each get a tmpfs of their own mounted with `noswap` (Ubuntu
+  24.04, Debian 13 and Ubuntu 26.04 all qualify). Older kernels (Debian
+  12's 6.1, for example) get a ramfs instead, which is never swapped
+  either; only if that mount is refused too, a plain directory on `/run`,
+  with a warning.
 - Linux with **systemd ≥ 250** (`systemd-creds` availability; ≥ 259
-  recommended for the full feature set this pipeline uses).
-- Standard coreutils: `shred`, `base64`, `sha256sum`, `install`, `nano`.
+  recommended for the full feature set this pipeline uses). Ubuntu 22.04
+  ships 249 and Debian 11 ships 247; the installer refuses both, and a
+  package upgrade within those releases does not help. Upgrade the release
+  instead: `do-release-upgrade` to Ubuntu 24.04, or Debian 12 or 13.
+- On kernels older than 6.4, the application user must be a member of a
+  group with the same name (the default for users made by
+  `adduser`/`useradd`): on a ramfs, `.env` belongs to root and is readable
+  by that group (`documentation/COMPONENTS.md` Section 4.2).
+- Standard coreutils: `shred`, `base64`, `sha256sum`, `install`, `stat`,
+  `readlink`, plus `getent` (from glibc; package `libc-bin` on Debian and
+  Ubuntu) and `nano`. GNU coreutils and the Rust uutils that Ubuntu 26.04
+  installs by default both work.
 - An unprivileged application user already created, and root/sudo access
   for the one-time setup.
 
@@ -115,10 +139,18 @@ Check directly rather than assuming:
 
 ```bash
 cat /proc/swaps
-# expect only the header line -- see Requirements above if anything else is listed
+# expect only the header line, or only /dev/zramN lines -- see Requirements above
+cat /sys/block/zram*/backing_dev 2>/dev/null
+# for each zram device, expect: none
+grep . /sys/kernel/kexec/crash_loaded /sys/kernel/kexec/crash_size \
+       /sys/kernel/kexec_crash_loaded /sys/kernel/kexec_crash_size 2>/dev/null
+# with zram swap on, expect every value to be 0 (kdump off); no output at
+# all means a kernel without kdump. After installing, the authority is
+# sudo /usr/local/sbin/YOUR_APP-secrets-guard check
+uname -r
 systemctl --version | head -1
 which systemd-creds && systemd-creds --version
-which shred base64 sha256sum install nano
+which shred base64 sha256sum install stat readlink getent nano
 ```
 
 Missing something? See
@@ -152,10 +184,15 @@ exactly one code path that produces the blob:
 
 ```bash
 sudo YOUR_APP-secrets-open
-sudo nano /dev/shm/YOUR_APP-env.edit
+sudo sh -c 'echo 0 > /proc/$$/coredump_filter && exec nano /run/YOUR_APP-secrets-edit/env.edit'
 # add, change, or remove a KEY=value line, save, exit nano
 sudo YOUR_APP-secrets-commit
 ```
+
+The edit copy lives on its own `noswap` tmpfs, and the `sh -c` wrapper
+keeps `nano`'s memory out of core dumps; keep the single quotes, so that
+`$$` is the new shell's PID and not your own
+([`documentation/COMPONENTS.md` §4.4](documentation/COMPONENTS.md#44-the-helper-scripts--the-actual-files-not-just-a-description)).
 
 `YOUR_APP-secrets-commit` ends by printing a fresh checksum and base64
 blob — copy that into your password manager immediately. See
@@ -203,7 +240,7 @@ explicit responsibility — nothing here does it for you automatically.
 | File | Covers |
 | --- | --- |
 | [`documentation/ABOUT.md`](documentation/ABOUT.md) | What this is, why it's shaped this way, and the full architecture |
-| [`documentation/COMPONENTS.md`](documentation/COMPONENTS.md) | The encrypted bundle, the decrypt-at-boot unit, the env-file symlink, and the two helper scripts (full source) |
+| [`documentation/COMPONENTS.md`](documentation/COMPONENTS.md) | The encrypted bundle, the decrypt-at-boot unit, the env-file symlink, the two helper scripts, and the swap guard (full source) |
 | [`documentation/INSTALLATION-AND-OPERATION.md`](documentation/INSTALLATION-AND-OPERATION.md) | Prerequisites, one-time setup (manual and via the installer), and day-to-day secret rotation |
 | [`documentation/VERIFYING-SAVED-BACKUP.md`](documentation/VERIFYING-SAVED-BACKUP.md) | Proving a saved backup is actually correct |
 | [`documentation/BACKUP.md`](documentation/BACKUP.md) | Password manager choice, what to store and when, host-key backup tradeoffs |
@@ -222,6 +259,8 @@ Read them in the order listed on a first pass — each assumes the last.
 ├── .gitignore
 ├── .gitattributes
 ├── ram-only-secrets-install.sh
+├── tests/
+│   └── run.sh
 ├── .github/
 │   └── ISSUE_TEMPLATE/
 │       ├── bug_report.yml
@@ -238,13 +277,25 @@ Read them in the order listed on a first pass — each assumes the last.
 
 ## Security notes
 
-- **The RAM-only guarantee assumes no active swap, full stop.** `tmpfs` is
-  swappable like any other memory — with swap enabled, decrypted secrets
-  can be paged out to a swap device under memory pressure, which is
-  exactly the disk exposure this pipeline exists to prevent, just
-  relocated. There is no override flag for this anywhere in the pipeline;
-  see [Requirements](#requirements) and
+- **The RAM-only guarantee assumes no swap can reach disk, full stop.**
+  `tmpfs` is swappable like any other memory. With a swap partition or
+  swap file enabled, decrypted secrets can be paged out to it under memory
+  pressure, which is exactly the disk exposure this pipeline exists to
+  prevent, just relocated. zram swap passes only without a writeback
+  device and only while kdump is off. There is no override flag for this
+  anywhere in the pipeline; see [Requirements](#requirements) and
   [`documentation/ABOUT.md`](documentation/ABOUT.md#2-why-this-shape).
+- **The swap check is a point-in-time check.** It runs at install, at
+  every boot and before every edit and commit, not continuously. The
+  `.env` and the edit copy sit on `noswap` tmpfs mounts, so a swap
+  switched on in between can't take them; your application's memory is
+  another matter, and `MemorySwapMax=0` on its unit closes that. What
+  the check cannot cover (swap switched on in between, zram writeback
+  from before, core dumps, hibernation, the hypervisor) is listed in
+  [`documentation/COMPONENTS.md` §4.5](documentation/COMPONENTS.md#45-the-swap-guard-one-check-used-everywhere).
+- The swap rules have tests: `sh tests/run.sh` runs them against fixture
+  `/proc` and `/sys` trees, unprivileged, on any POSIX shell. They don't
+  exercise a real mount or a real boot; check those on the host.
 - Review the installer and every generated unit/script before running
   them as root, the same as you would with any script you didn't write
   yourself.

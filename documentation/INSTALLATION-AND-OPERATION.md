@@ -5,16 +5,20 @@
 Sections 5.1 and 5.2 below are automated end-to-end by
 `ram-only-secrets-install.sh`, shipped alongside this document. It performs
 every check and every step described in 5.1/5.2 — including generating
-both helper scripts (Section 4.4) and the systemd unit (Section 4.2) itself,
-with your app name/user/UID substituted in automatically — and stops only
-for the one step that has to stay interactive: filling in your actual
-secret values in `nano`.
+the swap guard (Section 4.5), both helper scripts (Section 4.4) and the
+systemd unit (Section 4.2) itself, with your app name/user/UID
+substituted in automatically — and stops only for the one step that has
+to stay interactive: filling in your actual secret values in `nano`.
 
 ```bash
 chmod +x ram-only-secrets-install.sh
 sudo ./ram-only-secrets-install.sh YOUR_APP YOUR_APP_USER
 # UID is auto-detected from YOUR_APP_USER; pass it as a 3rd argument only
 # if that lookup fails for some reason.
+# YOUR_APP: lowercase letters, digits, '-' and '_' (at most 64 characters).
+# YOUR_APP_USER: letters, digits, '.', '-' and '_' (at most 32). Both end up
+# verbatim in generated scripts and the systemd unit, so the installer
+# refuses anything else.
 ```
 
 **Read the script before you run it as root** — it's a genuinely small,
@@ -53,26 +57,46 @@ itself.** Three things this fast path adds beyond the bare mechanics of
 
 Don't take these on faith — check them directly.
 
-**Hard requirement, checked first: no active swap anywhere on this host.**
-`tmpfs` (where the decrypted `.env` file will live, Section 3) is
-swappable by default like any other memory — with swap enabled, the
-kernel can page plaintext secrets out to a swap device under memory
-pressure, defeating the entire RAM-only guarantee this pipeline exists to
-provide (`documentation/ABOUT.md` Section 2). This is not a soft
-recommendation: the installer, the boot unit, and both helper scripts all
-independently refuse to run while any swap is active, with no override
-flag anywhere.
+**Hard requirement, checked first: no swap that can reach disk.** `tmpfs`
+(where the decrypted `.env` file will live, Section 3) is swappable by
+default like any other memory. With a swap partition or swap file active,
+the kernel can page plaintext secrets out to it under memory pressure,
+defeating the entire RAM-only guarantee this pipeline exists to provide
+(`documentation/ABOUT.md` Section 2). Swap on zram passes, because zram
+keeps swapped pages compressed in RAM, but only without a writeback
+backing device and only while kdump is off; `documentation/COMPONENTS.md`
+Section 4.5 has every rule. This is not a soft recommendation: the
+installer, the boot unit, and both helper scripts all run the same check
+and refuse to go on when it fails, with no override flag anywhere.
 
 ```bash
 cat /proc/swaps
-# expect: only the header line ("Filename Type Size Used Priority"),
-# nothing below it. Anything listed below that line is active swap --
-# disable and remove it before going any further:
-sudo swapoff -a
+# expect: only the header line ("Filename Type Size Used Priority"), or
+# only /dev/zramN lines below it. Anything else is swap that can reach
+# disk -- disable and remove it before going any further:
+sudo swapoff /dev/sdXN     # that device or swap file; swapoff -a for all
 # then remove/comment its entries so it doesn't return on reboot:
 grep -n swap /etc/fstab
 systemctl list-units --type=swap --all
-# a zram device or another swap generator may need disabling at its own source
+
+# zram swap only: no zram device may have a writeback backing device
+cat /sys/block/zram*/backing_dev
+# expect: none, once per device (zram-generator: drop writeback-device=
+# from zram-generator.conf)
+
+# zram swap only: kdump must be off -- expect every value to be 0. Linux
+# 7.0 has /sys/kernel/kexec/crash_*, older kernels only the
+# /sys/kernel/kexec_crash_* names. No output at all means a kernel without
+# kdump support, which passes too.
+grep . /sys/kernel/kexec/crash_loaded /sys/kernel/kexec/crash_size \
+       /sys/kernel/kexec_crash_loaded /sys/kernel/kexec_crash_size 2>/dev/null
+# anything else: see "Ubuntu turns kdump on by default" in COMPONENTS.md 4.5.
+# Once the guard is installed (Section 5.2 step 1), it is the authority:
+# /usr/local/sbin/YOUR_APP-secrets-guard check
+
+# 6.4 or later gives the .env and the edit copy their own noswap tmpfs
+# (older: plain /run directories)
+uname -r
 ```
 
 ```bash
@@ -87,14 +111,20 @@ which systemd-creds && systemd-creds --version
 # real hardware-backed option if you want it later.
 systemd-creds has-tpm2 || echo "no TPM2 -- host-only key will be used, which is what this pipeline assumes throughout"
 
-# The plain coreutils this pipeline relies on -- present on virtually
-# every Linux install already, confirm rather than assume:
-which shred base64 sha256sum install nano
+# The plain coreutils this pipeline relies on (GNU or Ubuntu 26.04's
+# uutils), plus getent (from glibc, package libc-bin) and nano -- present
+# on virtually every Linux install already, confirm rather than assume:
+which shred base64 sha256sum install stat readlink getent nano
 ```
 
-If `systemd-creds` is missing entirely, or `systemctl --version` reports
-something clearly old, update the `systemd` package itself (it's not a
-separate install — `systemd-creds` comes bundled with it):
+`systemd-creds` needs systemd 250 or newer. Ubuntu 22.04 (systemd 249)
+and Debian 11 (247) are older, and no package update within those
+releases changes that: upgrade the release itself (`sudo
+do-release-upgrade` to Ubuntu 24.04, or to Debian 12 or 13). The
+installer says the same when it finds such a version. On a supported
+release where `systemd-creds` is missing anyway, update the `systemd`
+package itself (it's not a separate install — `systemd-creds` comes
+bundled with it):
 
 ```bash
 # Debian / Ubuntu
@@ -124,10 +154,19 @@ setup below.
 ```bash
 # --- as root ---
 
-# 1. Install the two helper scripts from Section 4.4 and make them executable.
+# 1. Install the swap guard from Section 4.5 and the two helper scripts
+#    from Section 4.4, and make them executable. Rather than pasting the
+#    guard's few hundred lines, you can copy it out of the installer:
+#      { echo '#!/bin/sh'
+#        sed -n '/^# --- ros-lib begin ---$/,/^# --- ros-lib end ---$/p' ram-only-secrets-install.sh
+#        echo 'ros_main "$@"'; } > /usr/local/sbin/YOUR_APP-secrets-guard
+nano /usr/local/sbin/YOUR_APP-secrets-guard
 nano /usr/local/sbin/YOUR_APP-secrets-open
 nano /usr/local/sbin/YOUR_APP-secrets-commit
-chmod 750 /usr/local/sbin/YOUR_APP-secrets-open /usr/local/sbin/YOUR_APP-secrets-commit
+chmod 750 /usr/local/sbin/YOUR_APP-secrets-guard /usr/local/sbin/YOUR_APP-secrets-open /usr/local/sbin/YOUR_APP-secrets-commit
+# Then run the same check the installer runs first:
+/usr/local/sbin/YOUR_APP-secrets-guard check
+# expect: "... swap check passed: ...". A refusal names what to fix.
 
 # 2. Install the systemd unit from Section 4.2.
 nano /etc/systemd/system/YOUR_APP-secrets.service
@@ -144,13 +183,21 @@ install -d -m 0755 /etc/credstore.encrypted
 #    all, in plaintext, forever, which is precisely what this whole
 #    document exists to avoid. Create the empty file, then edit it with
 #    nano instead -- nano's own buffer is never written to shell history,
-#    only the command "nano /dev/shm/YOUR_APP-env.edit" is.
-: > /dev/shm/YOUR_APP-env.edit
-chmod 600 /dev/shm/YOUR_APP-env.edit
-nano /dev/shm/YOUR_APP-env.edit
+#    only the command that starts nano is.
+#    The file goes on its own noswap tmpfs (Section 4.4), and this shell
+#    first sets its core dump filter to 0, which nano and systemd-creds
+#    inherit (Section 4.4 explains why ulimit -c 0 is not enough).
+echo 0 > /proc/$$/coredump_filter
+/usr/local/sbin/YOUR_APP-secrets-guard mount /run/YOUR_APP-secrets-edit
+install -d -m 0700 /run/YOUR_APP-secrets-edit
+: > /run/YOUR_APP-secrets-edit/env.edit
+chmod 600 /run/YOUR_APP-secrets-edit/env.edit
+nano /run/YOUR_APP-secrets-edit/env.edit
 # type your real KEY=value lines inside the editor now, save, exit
-systemd-creds encrypt --name=YOUR_APP-env /dev/shm/YOUR_APP-env.edit /etc/credstore.encrypted/YOUR_APP-env
-shred -u /dev/shm/YOUR_APP-env.edit
+(umask 077; systemd-creds encrypt --name=YOUR_APP-env /run/YOUR_APP-secrets-edit/env.edit /etc/credstore.encrypted/YOUR_APP-env)
+shred -u /run/YOUR_APP-secrets-edit/env.edit
+umount /run/YOUR_APP-secrets-edit; rmdir /run/YOUR_APP-secrets-edit
+# (umount fails harmlessly where both mounts were refused and it stayed a plain directory)
 
 # 5. Enable and start the unit -- this performs the first decrypt into RAM.
 systemctl daemon-reload
@@ -159,9 +206,14 @@ systemctl enable --now YOUR_APP-secrets.service
 # 6. Verify.
 systemctl status YOUR_APP-secrets.service
 ls -l /run/YOUR_APP-secrets/.env
-# expect: -rw------- YOUR_APP_USER YOUR_APP_USER
+# expect: -rw------- YOUR_APP_USER YOUR_APP_USER   (noswap tmpfs)
+#     or: -r--r----- root YOUR_APP_USER            (ramfs, kernel older than 6.4)
 grep -c '=' /run/YOUR_APP-secrets/.env
 # sanity-check the line count only -- do not print values
+/usr/local/sbin/YOUR_APP-secrets-guard status /run/YOUR_APP-secrets
+# expect on Linux 6.4+: "... is a noswap tmpfs.", on older kernels
+# "... is a ramfs." A warning means it stayed a plain directory;
+# journalctl -u YOUR_APP-secrets.service says why.
 
 # 7. Take the FIRST backup now, the same way every later commit prints one.
 sha256sum /etc/credstore.encrypted/YOUR_APP-env
@@ -205,10 +257,14 @@ ln -s /run/YOUR_APP-secrets/.env YOUR_APP_DIR/.env
       exists with correct content *without* any manual step.
 - [ ] Confirm no plaintext copy exists anywhere on persistent disk (check
       shell history, `/tmp`, any editor swap/backup files).
-- [ ] `cat /proc/swaps` still shows only the header line -- no OS-level
-      swap (distinct from the editor swap files in the bullet above) has
-      been enabled since Section 5.1. Required, not optional -- see
+- [ ] `sudo /usr/local/sbin/YOUR_APP-secrets-guard check` still passes --
+      no OS-level swap that can reach disk (distinct from the editor swap
+      files in the bullet above) has been enabled since Section 5.1, and
+      kdump is still off if zram swap is on. Required, not optional -- see
       `documentation/ABOUT.md` Section 2.
+- [ ] On Linux 6.4 or later, `findmnt /run/YOUR_APP-secrets` shows a
+      `tmpfs` with `noswap` among its options; on older kernels, a
+      `ramfs`.
 - [ ] Confirm `/etc/credstore.encrypted/YOUR_APP-env` is unreadable as
       plaintext (`file /etc/credstore.encrypted/YOUR_APP-env` should report
       binary/opaque data, not text).
@@ -225,10 +281,17 @@ so there is exactly one code path that produces the blob.
 
 ```bash
 sudo YOUR_APP-secrets-open
-sudo nano /dev/shm/YOUR_APP-env.edit
+sudo sh -c 'echo 0 > /proc/$$/coredump_filter && exec nano /run/YOUR_APP-secrets-edit/env.edit'
 # add, change, or remove a KEY=value line, save, exit nano
 sudo YOUR_APP-secrets-commit
 ```
+
+`YOUR_APP-secrets-open` prints that editor line too. Keep the single
+quotes: `$$` has to be the PID of the new `sh`, whose core dump filter
+`nano` then inherits (Section 4.4). If `YOUR_APP-secrets-commit` refuses,
+the edit copy stays where it is, on its `noswap` tmpfs, and the script
+says so; fix what it names and run it again, or discard the edit with
+`shred -u`.
 
 `YOUR_APP-secrets-commit`'s own output ends with the fresh checksum and the
 fresh base64 blob — that output *is* the next step: copy it into your
@@ -237,3 +300,46 @@ since it's a brand-new ciphertext of whatever the edit file contained — the
 old backed-up blob is now stale the moment you commit, which is why the
 script prints a new one every single time rather than leaving that as a
 separate step you have to remember.
+
+### 5.4 Updating a host set up before the swap guard
+
+A host installed before the swap guard existed keeps working unchanged,
+under the older and stricter rule of no swap at all. Moving it to the
+current version doesn't touch the encrypted bundle, so no secret needs
+re-entering. Don't re-run the installer for this: it would open `nano`
+on an empty file and replace the bundle with whatever you type.
+
+Finish or discard any edit in progress first (`/dev/shm/YOUR_APP-env.edit`
+must not exist; the new `YOUR_APP-secrets-open` refuses to start while it
+does). Then:
+
+```bash
+# --- as root, from a checkout of this repository ---
+{ echo '#!/bin/sh'
+  sed -n '/^# --- ros-lib begin ---$/,/^# --- ros-lib end ---$/p' ram-only-secrets-install.sh
+  echo 'ros_main "$@"'; } > /usr/local/sbin/YOUR_APP-secrets-guard
+chmod 750 /usr/local/sbin/YOUR_APP-secrets-guard
+/usr/local/sbin/YOUR_APP-secrets-guard check
+
+# Replace both helper scripts completely with the versions in Section 4.4
+# (the edit copy moved, so patching the old swap test is not enough), and
+# the [Unit] block plus the CoredumpFilter=/ExecStartPre=/ExecStart= lines
+# of the unit with those from Section 4.2:
+nano /usr/local/sbin/YOUR_APP-secrets-open
+nano /usr/local/sbin/YOUR_APP-secrets-commit
+nano /etc/systemd/system/YOUR_APP-secrets.service
+systemctl daemon-reload
+systemctl restart YOUR_APP-secrets.service
+/usr/local/sbin/YOUR_APP-secrets-guard status /run/YOUR_APP-secrets
+```
+
+On Linux 6.4 and later, where the mount is allowed, the restart deletes
+the old `.env` from `/run`'s shared tmpfs, mounts the new `noswap` tmpfs
+in its place and writes the file again inside it; on older kernels it
+mounts a ramfs instead. Only if both are refused it warns and keeps the
+plain directory, and `status` says so. On a ramfs, `.env` belongs to
+root and is readable by the group `YOUR_APP_USER` (`-r--r----- root
+YOUR_APP_USER`), so there the application user must be a member of that
+group and the reading process must carry it (`documentation/COMPONENTS.md`
+Section 4.2). Switch zram swap on only
+after this, and only without a writeback device.
