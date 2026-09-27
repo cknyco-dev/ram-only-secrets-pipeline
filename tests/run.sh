@@ -118,7 +118,7 @@ ros_mount_noswap() {
   esac
 }
 ros_umount() {
-  grep -v " $1 " "$ROS_MOUNTINFO" > "$ROS_MOUNTINFO.new"
+  grep -F -v " $1 " "$ROS_MOUNTINFO" > "$ROS_MOUNTINFO.new"
   mv "$ROS_MOUNTINFO.new" "$ROS_MOUNTINFO"
 }
 FAKE_NS=same
