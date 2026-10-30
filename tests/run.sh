@@ -638,9 +638,20 @@ expect "-secrets-open appends the running lines below the marker" \
 expect "-secrets-open keeps the blob's lines above the marker" \
   [ "$(sed '/^#### myapp-secrets-open: /,$d' "$T/ed/env.edit")" = "$(printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc')" ]
 expect "-secrets-open leaves no helper file behind" [ ! -e "$T/ed/ram-only" ]
+# A blob whose last line has no newline: the marker still gets a line of
+# its own, and the last value stays as it was.
+printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc' > "$T/ed/env.edit"
+t "-secrets-open with a blob lacking the final newline" 0 '*' cmp_run
+expect "-secrets-open puts the marker on a line of its own" \
+  grep -qx "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/open")" "$T/ed/env.edit"
+expect "-secrets-open keeps the blob's last line intact" \
+  [ "$(sed '/^#### myapp-secrets-open: /,$d' "$T/ed/env.edit")" = "$(printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc')" ]
+printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\n' > "$T/ed/env.edit"
+cmp_run > /dev/null 2>&1
 
-# The marker cut of -secrets-commit, run against fixture files.
-awk '/^MARK_LINE=/ {f=1} f {print} f && /^fi$/ {exit}' "$T/commit" > "$T/cut.sh"
+# -secrets-commit from the marker cut up to the encryption, run against
+# fixture files.
+awk '/^systemd-creds encrypt / {exit} /^MARK_LINE=/ {f=1} f {print}' "$T/commit" > "$T/cut.sh"
 cut_run() {
   EDIT_DIR=$T/ed EDIT_FILE=$T/ed/env.edit
   MARK=$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")
@@ -655,6 +666,10 @@ expect "-secrets-commit keeps what was moved above the marker" \
 expect "-secrets-commit leaves no cut file behind" [ ! -e "$T/ed/env.cut" ]
 printf '%s\nA_KEY=val-aaaa\n' "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")" > "$T/ed/env.edit"
 t "-secrets-commit refuses when nothing is above the marker" 1 "*refusing to commit an empty bundle*" cut_run
+printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb%s\nNEW_KEY=val-nnnn\n' "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")" > "$T/ed/env.edit"
+cp "$T/ed/env.edit" "$T/ed/env.before"
+t "-secrets-commit refuses a marker that shares a line" 1 "*marker line*other text on the same line*refusing to commit*" cut_run
+expect "-secrets-commit leaves the edit copy as it was after that refusal" cmp -s "$T/ed/env.edit" "$T/ed/env.before"
 
 echo "# drift check (Section 4.6)"
 

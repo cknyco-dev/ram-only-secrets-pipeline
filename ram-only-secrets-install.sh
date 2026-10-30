@@ -911,6 +911,11 @@ if [ -f "\$RUNNING_ENV" ]; then
     if [ -n "\$MISSING" ]; then echo "  not in the running .env (kept):  \$MISSING"; fi
   fi
   if [ -s "\$RAM_ONLY" ]; then
+    # The marker must start a line of its own: appended to a last line
+    # without a newline, ${APP}-secrets-commit would not find it.
+    if [ -s "\$EDIT_FILE" ] && ! tail -c 1 "\$EDIT_FILE" | grep -q '^\$'; then
+      echo >> "\$EDIT_FILE"
+    fi
     {
       echo "\$MARK"
       echo "# Lines from the running .env that are not in the blob. To keep one,"
@@ -991,6 +996,12 @@ if [ -n "\$MARK_LINE" ]; then
     echo "Nothing above the marker line in \$EDIT_FILE -- refusing to commit an empty bundle." >&2
     exit 1
   fi
+elif grep -q -F -- "\$MARK" "\$EDIT_FILE"; then
+  # The marker shares a line with other text. Committing the whole file
+  # would take in the running-.env lines below it unseen.
+  echo "The marker line in \$EDIT_FILE has other text on the same line -- refusing to commit." >&2
+  echo "Put the marker on a line of its own (or delete it and everything below it), then run ${APP}-secrets-commit again." >&2
+  exit 1
 fi
 
 systemd-creds encrypt --name=${APP}-env "\$EDIT_FILE" "\$BLOB"
