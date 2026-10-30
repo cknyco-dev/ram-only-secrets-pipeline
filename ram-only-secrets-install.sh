@@ -1004,6 +1004,16 @@ elif grep -q -F -- "\$MARK" "\$EDIT_FILE"; then
   exit 1
 fi
 
+# One line per name. With two, which value applies is up to whatever reads
+# the .env, and ${APP}-secrets-drift could not tell from the names which
+# one is running. Names only in the message, never values.
+DUP_NAMES=\$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "\$EDIT_FILE" | sort | uniq -d | tr '\n' ' ')
+if [ -n "\$DUP_NAMES" ]; then
+  echo "More than one line in \$EDIT_FILE sets: \${DUP_NAMES% } -- refusing to commit." >&2
+  echo "Keep one line per name, then run ${APP}-secrets-commit again." >&2
+  exit 1
+fi
+
 systemd-creds encrypt --name=${APP}-env "\$EDIT_FILE" "\$BLOB"
 shred -u "\$EDIT_FILE"
 # Drop the edit tmpfs. On the plain-directory fallback there is nothing to
@@ -1184,6 +1194,10 @@ blob() { systemd-creds decrypt --name=${APP}-env "\$BLOB" - 2>/dev/null; }
 # grep as patterns on a pipe (-f -), never on a command line, where any
 # local user can read them in /proc/PID/cmdline (proc(5)).
 extra() { blob | grep -Fxv -f - "\$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*\$' || true; }
+# The blob's lines that are not in the running .env, the running .env's
+# lines as patterns from the file. A name can still be there with another
+# of its values: a blob with KEY=old and KEY=new against a running KEY=old.
+gone() { blob | grep -Fxv -f "\$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*\$' || true; }
 
 # A failed decrypt would hand grep no patterns and make every line look new.
 blob > /dev/null || fail "cannot decrypt \$BLOB"
@@ -1191,9 +1205,15 @@ blob > /dev/null || fail "cannot decrypt \$BLOB"
 BLOB_NAMES=\$(blob | names | tr '\n' ' ')
 RUN_NAMES=\$(names < "\$RUNNING_ENV" | tr '\n' ' ')
 ADDED="" CHANGED="" MISSING=""
-for n in \$(extra | names); do
+# A name in both files whose lines differ has a different value there. A
+# name only in the blob is missing (below), one only in the running .env
+# is added.
+for n in \$( { extra; gone; } | names); do
   case " \$BLOB_NAMES " in
-    *" \$n "*) CHANGED="\$CHANGED \$n" ;;
+    *" \$n "*)
+      case " \$RUN_NAMES " in
+        *" \$n "*) CHANGED="\$CHANGED \$n" ;;
+      esac ;;
     *) ADDED="\$ADDED \$n" ;;
   esac
 done
@@ -1207,7 +1227,7 @@ ADDED=\${ADDED# } CHANGED=\${CHANGED# } MISSING=\${MISSING# }
 
 mkdir -p "\${STATE%/*}"
 LAST=\$(cat "\$STATE" 2>/dev/null || true)
-if [ -z "\$MISSING" ] && ! extra | grep -q .; then
+if ! { extra; gone; } | grep -q .; then
   if [ -n "\$LAST" ]; then
     rm -f "\$STATE"
     say "in sync again: the running .env matches the blob"
@@ -1216,10 +1236,10 @@ if [ -z "\$MISSING" ] && ! extra | grep -q .; then
   exit 0
 fi
 
-# One hash of what differs: the differing lines themselves, so a second
+# One hash of what differs: the differing lines of both files, so a second
 # change to the same name counts as new, and the missing names. Kept in
 # RAM, root-only, only to tell new drift from drift already reported.
-SUM=\$( { extra; echo "missing: \$MISSING"; } | sha256sum | cut -d' ' -f1)
+SUM=\$( { extra; echo "gone:"; gone; echo "missing: \$MISSING"; } | sha256sum | cut -d' ' -f1)
 if [ "\$SUM" = "\$LAST" ]; then exit 0; fi
 printf '%s\n' "\$SUM" > "\$STATE"
 say "drift: only in the running .env: \${ADDED:--}; different value there: \${CHANGED:--}; missing there: \${MISSING:--}"

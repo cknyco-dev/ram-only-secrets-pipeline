@@ -670,6 +670,11 @@ printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb%s\nNEW_KEY=val-nnnn\n' "$(sed -n "s/^MARK
 cp "$T/ed/env.edit" "$T/ed/env.before"
 t "-secrets-commit refuses a marker that shares a line" 1 "*marker line*other text on the same line*refusing to commit*" cut_run
 expect "-secrets-commit leaves the edit copy as it was after that refusal" cmp -s "$T/ed/env.edit" "$T/ed/env.before"
+printf 'A_KEY=val-aaaa\nB_KEY=val-old\nexport B_KEY=val-new\n' > "$T/ed/env.edit"
+t "-secrets-commit refuses a name set twice, by name only" 1 "*More than one line*sets: B_KEY -- refusing to commit*" cut_run
+expect "-secrets-commit printed no value for the name set twice" not_grep -E 'val-' "$T/out"
+printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\n%s\nB_KEY=val-CHANGED\n' "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")" > "$T/ed/env.edit"
+t "-secrets-commit lets a name repeat below the marker" 0 '*' cut_run
 
 echo "# drift check (Section 4.6)"
 
@@ -765,6 +770,21 @@ if [ "$(uname -s)" = Linux ]; then
   t "drift: a failed decrypt is an error, not drift" 1 "*error: cannot decrypt*" drift_run
   expect "drift: hook gets the error event" [ "$(calls)" = "error myapp" ]
   rm -f "$D/decrypt-fails"
+
+  # A name set twice in the blob, one of its lines gone from the running
+  # .env: the effective value changed although every running line is in
+  # the blob.
+  : > "$D/calls"
+  printf 'A_KEY=val-aaaa\nB_KEY=val-old\nB_KEY=val-new\n' > "$D/blob.plain"
+  printf 'A_KEY=val-aaaa\nB_KEY=val-old\n' > "$D/running.env"
+  t "drift: a blob line missing from the running .env is reported" 0 \
+    "*only in the running .env: -; different value there: B_KEY; missing there: -*" drift_run
+  expect "drift: hook gets the name whose blob line is gone" [ "$(calls)" = "drift myapp  B_KEY" ]
+  : > "$D/calls"
+  cp "$D/blob.plain" "$D/running.env"
+  t "drift: in sync once the running .env has both lines again" 0 "*in sync again*" drift_run
+  printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\n' > "$D/blob.plain"
+  cp "$D/blob.plain" "$D/running.env"
 
   : > "$D/calls"
   printf 'NEW_KEY=val-nnnn\n' >> "$D/running.env"

@@ -319,7 +319,9 @@ line and everything below it, and refuses to commit when nothing is left
 above it. The marker always starts a line of its own, even when the blob's
 last line has no newline; if it ends up sharing a line with other text
 anyway, `YOUR_APP-secrets-commit` refuses instead of committing the whole
-file, running-`.env` lines included.
+file, running-`.env` lines included. It also refuses a bundle that sets
+the same name on more than one line above the marker, and names it: which
+of the two values applies would be up to whatever reads the `.env`.
 
 **The same gate as the unit.** Both scripts refuse to run at all when
 `YOUR_APP-secrets-guard check` (Section 4.5) refuses, same hard requirement
@@ -553,6 +555,16 @@ elif grep -q -F -- "$MARK" "$EDIT_FILE"; then
   # would take in the running-.env lines below it unseen.
   echo "The marker line in $EDIT_FILE has other text on the same line -- refusing to commit." >&2
   echo "Put the marker on a line of its own (or delete it and everything below it), then run YOUR_APP-secrets-commit again." >&2
+  exit 1
+fi
+
+# One line per name. With two, which value applies is up to whatever reads
+# the .env, and YOUR_APP-secrets-drift could not tell from the names which
+# one is running. Names only in the message, never values.
+DUP_NAMES=$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "$EDIT_FILE" | sort | uniq -d | tr '\n' ' ')
+if [ -n "$DUP_NAMES" ]; then
+  echo "More than one line in $EDIT_FILE sets: ${DUP_NAMES% } -- refusing to commit." >&2
+  echo "Keep one line per name, then run YOUR_APP-secrets-commit again." >&2
   exit 1
 fi
 
@@ -1447,10 +1459,15 @@ it within seconds.
 **What it reports.** `YOUR_APP-secrets-drift` compares the running `.env`
 with the blob and reports by NAME only: names only in the running `.env`,
 names with a different value there, and names missing there. It never
-prints, logs or passes on a value. The blob is decrypted only into a pipe:
-`grep -F -f -` reads its lines as patterns from standard input, so no
-value is ever written to a file or put on a command line, where any local
-user can read it in `/proc/PID/cmdline` (`proc(5)`). Like the helper
+prints, logs or passes on a value. It compares lines in both directions:
+a blob line missing from the running `.env` counts even when its name is
+still there, so a blob that sets `KEY` twice against a running `.env`
+that kept only one of the two lines reports `KEY` as changed. The blob is
+decrypted only into a pipe: `grep -F -f -` reads its lines as patterns
+from standard input, and for the other direction `grep -F -f` reads the
+running `.env`'s lines from that file, so no value is ever written to a
+new file or put on a command line, where any local user can read it in
+`/proc/PID/cmdline` (`proc(5)`). Like the helper
 scripts it sets its own `coredump_filter` to 0 first and refuses to run
 when `YOUR_APP-secrets-guard check` refuses (Section 4.5).
 
@@ -1470,8 +1487,8 @@ missed event goes unnoticed otherwise, `YOUR_APP-secrets-drift.timer` runs
 the same check hourly, and 10 minutes after boot.
 
 **Each drift is reported once.** The check remembers a SHA-256 of the
-differing lines (values included, so a second change to the same name is
-new) and of the missing names, in `/run/ram-only-secrets-drift/YOUR_APP`:
+differing lines of both files (values included, so a second change to the
+same name is new) and of the missing names, in `/run/ram-only-secrets-drift/YOUR_APP`:
 RAM, root-only, kept between runs (`RuntimeDirectoryPreserve=yes`). The
 same drift found again by the timer stays quiet. When the running `.env`
 matches the blob again, for example after `YOUR_APP-secrets-commit`
@@ -1580,6 +1597,10 @@ blob() { systemd-creds decrypt --name=YOUR_APP-env "$BLOB" - 2>/dev/null; }
 # grep as patterns on a pipe (-f -), never on a command line, where any
 # local user can read them in /proc/PID/cmdline (proc(5)).
 extra() { blob | grep -Fxv -f - "$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' || true; }
+# The blob's lines that are not in the running .env, the running .env's
+# lines as patterns from the file. A name can still be there with another
+# of its values: a blob with KEY=old and KEY=new against a running KEY=old.
+gone() { blob | grep -Fxv -f "$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' || true; }
 
 # A failed decrypt would hand grep no patterns and make every line look new.
 blob > /dev/null || fail "cannot decrypt $BLOB"
@@ -1587,9 +1608,15 @@ blob > /dev/null || fail "cannot decrypt $BLOB"
 BLOB_NAMES=$(blob | names | tr '\n' ' ')
 RUN_NAMES=$(names < "$RUNNING_ENV" | tr '\n' ' ')
 ADDED="" CHANGED="" MISSING=""
-for n in $(extra | names); do
+# A name in both files whose lines differ has a different value there. A
+# name only in the blob is missing (below), one only in the running .env
+# is added.
+for n in $( { extra; gone; } | names); do
   case " $BLOB_NAMES " in
-    *" $n "*) CHANGED="$CHANGED $n" ;;
+    *" $n "*)
+      case " $RUN_NAMES " in
+        *" $n "*) CHANGED="$CHANGED $n" ;;
+      esac ;;
     *) ADDED="$ADDED $n" ;;
   esac
 done
@@ -1603,7 +1630,7 @@ ADDED=${ADDED# } CHANGED=${CHANGED# } MISSING=${MISSING# }
 
 mkdir -p "${STATE%/*}"
 LAST=$(cat "$STATE" 2>/dev/null || true)
-if [ -z "$MISSING" ] && ! extra | grep -q .; then
+if ! { extra; gone; } | grep -q .; then
   if [ -n "$LAST" ]; then
     rm -f "$STATE"
     say "in sync again: the running .env matches the blob"
@@ -1612,10 +1639,10 @@ if [ -z "$MISSING" ] && ! extra | grep -q .; then
   exit 0
 fi
 
-# One hash of what differs: the differing lines themselves, so a second
+# One hash of what differs: the differing lines of both files, so a second
 # change to the same name counts as new, and the missing names. Kept in
 # RAM, root-only, only to tell new drift from drift already reported.
-SUM=$( { extra; echo "missing: $MISSING"; } | sha256sum | cut -d' ' -f1)
+SUM=$( { extra; echo "gone:"; gone; echo "missing: $MISSING"; } | sha256sum | cut -d' ' -f1)
 if [ "$SUM" = "$LAST" ]; then exit 0; fi
 printf '%s\n' "$SUM" > "$STATE"
 say "drift: only in the running .env: ${ADDED:--}; different value there: ${CHANGED:--}; missing there: ${MISSING:--}"
