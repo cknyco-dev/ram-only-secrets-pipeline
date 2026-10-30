@@ -135,6 +135,10 @@ ros_umount() {
 }
 FAKE_NS=same
 ros_same_mount_ns() { [ "$FAKE_NS" = same ]; }
+# shred is not on every test host; this one logs its arguments, so a test
+# can see that a plaintext file was shredded and not just removed.
+# shellcheck disable=SC2329 # called by ros_mount_secrets_dir
+shred() { echo "shred $*" >> "$T/shred.log"; shift; rm -f "$@"; }
 # ros_pause runs PAUSE_HOOK instead of sleeping, so a test can change the
 # fixture between the first read and the retry.
 PAUSE_HOOK=:
@@ -410,8 +414,11 @@ t "restart reuses the existing noswap tmpfs" 0 "*already a noswap tmpfs; reusing
 expect "restart: still exactly one mount, nothing stacked" [ "$(lines_at "$D")" = 1 ]
 
 reset; FAKE_MOUNT=ok; mkdir -p "$D"; echo 'OLD=plaintext' > "$D/.env"
+rm -f "$T/shred.log"
 t "migration from the plain-directory layout" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
 expect "migration: old .env on /run's shared tmpfs is deleted first" [ ! -e "$D/.env" ]
+expect "migration: old .env is shredded, not just removed" grep -qxF "shred -u -- $D/.env" "$T/shred.log"
+expect "installer removes no .env with rm" not_grep -E 'rm .*[.]env' "$INSTALLER"
 
 reset; echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=1024k,inode64" >> "$ROS_MOUNTINFO"
 t "existing tmpfs without noswap is refused" 1 "*neither a noswap tmpfs nor a ramfs*nothing was written*" ros_mount_secrets_dir "$D"
