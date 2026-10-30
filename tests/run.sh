@@ -109,9 +109,9 @@ FAKE_MOUNT=ok
 ros_mount_noswap() {
   case $FAKE_MOUNT in
     ok)
-      echo "99 25 0:77 / $1 rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64,noswap" >> "$ROS_MOUNTINFO" ;;
+      echo "99 25 0:77 / $1 rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=4096k,nr_inodes=16,mode=700,inode64,noswap" >> "$ROS_MOUNTINFO" ;;
     nonoswap)
-      echo "99 25 0:77 / $1 rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64" >> "$ROS_MOUNTINFO" ;;
+      echo "99 25 0:77 / $1 rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=4096k,nr_inodes=16,mode=700,inode64" >> "$ROS_MOUNTINFO" ;;
     fail)
       echo "mount: $1: permission denied." >&2
       return 32 ;;
@@ -424,8 +424,8 @@ t "existing ramfs is reused on 7.0 too" 0 "*already a ramfs; reusing it*" ros_mo
 expect "existing ramfs: nothing stacked" [ "$(lines_at "$D")" = 1 ]
 
 reset
-echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=2048k,inode64,noswap" >> "$ROS_MOUNTINFO"
-echo "91 90 0:51 / $D rw,relatime shared:45 - tmpfs tmpfs rw,size=2048k,inode64,noswap" >> "$ROS_MOUNTINFO"
+echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=4096k,inode64,noswap" >> "$ROS_MOUNTINFO"
+echo "91 90 0:51 / $D rw,relatime shared:45 - tmpfs tmpfs rw,size=4096k,inode64,noswap" >> "$ROS_MOUNTINFO"
 t "stacked mounts are refused" 1 "*2 mounts stacked*" ros_mount_secrets_dir "$D"
 
 reset; echo "90 25 0:50 / $D-old rw,relatime shared:44 - tmpfs tmpfs rw,inode64,noswap" >> "$ROS_MOUNTINFO"
@@ -542,6 +542,8 @@ expect "the real namespace check compares both links" \
 
 ros_render_guard YOUR_APP-secrets-guard "$INSTALLER" > "$T/guard"
 expect "rendered guard passes sh -n" sh -n "$T/guard"
+expect "noswap tmpfs holds three copies of a 1 MiB bundle (size=4m)" \
+  grep -qF 'mount -t tmpfs -o noswap,size=4m,' "$T/guard"
 expect "rendered guard ends by calling ros_main" [ "$(tail -n 1 "$T/guard")" = 'ros_main "$@"' ]
 t "rendered guard runs standalone: bad subcommand" 2 "*usage*" sh "$T/guard" --force
 # On a real host this checks the real /proc; only the exit status is fixed.
@@ -838,7 +840,7 @@ expect "unit has exactly one ownership step" [ "$(grep -c . "$T/own.sh")" = 1 ]
 # left to systemd's own rules. Every shell variable in the unit uses "$$".
 expect "unit writes every shell \$ in its sh -c lines as \$\$" \
   not_grep -E "^Exec[A-Za-z]*=/bin/sh -c .*([^$]|^)[$][A-Za-z_(]" "$T/unit"
-echo "99 25 0:77 / /run/myapp-secrets rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=2048k,nr_inodes=16,mode=700,inode64,noswap" > "$T/own.mountinfo"
+echo "99 25 0:77 / /run/myapp-secrets rw,nosuid,nodev,noexec,relatime shared:9 - tmpfs tmpfs rw,size=4096k,nr_inodes=16,mode=700,inode64,noswap" > "$T/own.mountinfo"
 t "unit on a noswap tmpfs: .env owned by the app user, 0600" 0 \
   "*install -d -m 0750 -o myuser -g myuser /run/myapp-secrets*install -m 0600 -o myuser -g myuser *" sh "$T/own.sh"
 echo "98 25 0:76 / /run/myapp-secrets rw,nosuid,nodev,noexec,relatime shared:8 - ramfs ramfs rw,mode=700" > "$T/own.mountinfo"

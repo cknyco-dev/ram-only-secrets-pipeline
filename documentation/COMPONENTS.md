@@ -60,7 +60,7 @@ ExecStartPre=/usr/local/sbin/YOUR_APP-secrets-guard check
 ExecStart=/usr/local/sbin/YOUR_APP-secrets-guard mount /run/YOUR_APP-secrets
 # In the sh -c lines below, every $ meant for the shell is written $$:
 # systemd.service(5) turns $$ into one literal $ before sh runs.
-# On a noswap tmpfs (capped at 2 MiB) the directory and .env go to
+# On a noswap tmpfs (capped at 4 MiB) the directory and .env go to
 # YOUR_APP_USER, 0750 and 0600, as always. On a ramfs, which has no size
 # limit, root keeps both and YOUR_APP_USER reads .env through its group
 # (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
@@ -173,7 +173,7 @@ fresh mount doesn't report `noswap` or doesn't show up as ramfs.
 
 **Who owns `.env`.** On a `noswap` tmpfs nothing changes: the directory
 and `.env` belong to `YOUR_APP_USER`, 0750 and 0600, and the tmpfs is
-capped at 2 MiB. A ramfs has no size limit and ignores every mount option
+capped at 4 MiB. A ramfs has no size limit and ignores every mount option
 but `mode`, and the kernel's own documentation says "only root (or a
 trusted user) should be allowed write access to a ramfs mount"
 (`Documentation/filesystems/ramfs-rootfs-initramfs.rst`). If the app user
@@ -210,7 +210,7 @@ generated unit sets none of these. To see which layout a host got:
 
 ```bash
 findmnt -no FSTYPE,OPTIONS /run/YOUR_APP-secrets
-# expect: tmpfs  rw,nosuid,nodev,noexec,relatime,size=2048k,nr_inodes=16,...,noswap
+# expect: tmpfs  rw,nosuid,nodev,noexec,relatime,size=4096k,nr_inodes=16,...,noswap
 #     or: ramfs  rw,nosuid,nodev,noexec,relatime,mode=700   (kernel older than 6.4;
 #         ramfs shows the mount option, not the directory's current mode)
 # no output: plain directory -- journalctl -u YOUR_APP-secrets.service says why
@@ -929,13 +929,17 @@ ros_same_mount_ns() {
   [ -n "$ros_ns_self" ] && [ "$ros_ns_self" = "$ros_ns_init" ]
 }
 ros_pause() { sleep 1; }
-# size=2m: one systemd credential may be up to 1 MiB (CREDENTIAL_SIZE_MAX,
-# systemd v259 src/shared/creds-util.h:12). mode=0700 keeps the directory
-# root-only until the unit's next ExecStart= line hands it to
-# YOUR_APP_USER, the same step that ran before this mount existed (on a
-# ramfs, that line keeps root as the owner instead; see below).
+# size=4m: one systemd credential may be up to 1 MiB (CREDENTIAL_SIZE_MAX,
+# systemd v259 src/shared/creds-util.h:12), and while YOUR_APP-secrets-open
+# compares, the edit tmpfs holds up to three copies of a bundle that size
+# (the edit copy, the running-only lines, and those lines again appended
+# below the marker). tmpfs takes RAM only for what is written. mode=0700
+# keeps the directory root-only until the unit's next ExecStart= line
+# hands it to YOUR_APP_USER, the same step that ran before this mount
+# existed (on a ramfs, that line keeps root as the owner instead; see
+# below).
 ros_mount_noswap() {
-  mount -t tmpfs -o noswap,size=2m,nr_inodes=16,mode=0700,nosuid,nodev,noexec tmpfs "$1"
+  mount -t tmpfs -o noswap,size=4m,nr_inodes=16,mode=0700,nosuid,nodev,noexec tmpfs "$1"
 }
 # ramfs where noswap is unavailable (kernel older than 6.4, or the noswap
 # mount refused). Its pages are never swapped: ramfs_get_inode() marks every
