@@ -1509,8 +1509,10 @@ HOOK EVENT APP ADDED CHANGED MISSING
 `MISSING` are space-separated names, empty for `resolved` and `error`.
 A hook only runs if it and the directory are owned by root and nobody
 else can write to them, since anyone who could change a hook would run
-code as root. Each hook gets 60 seconds; a hook that fails is logged and
-does not stop the others. The directory is shared by all instances on the
+code as root. Each hook gets 60 seconds, then SIGTERM, and SIGKILL 10
+seconds later if it is still running, so a hook that ignores SIGTERM
+cannot stall the others; a hook that fails is logged and does not stop
+the others. The directory is shared by all instances on the
 host; hooks that only care about one instance check `APP`. Without hooks,
 the reports are in the journal: `journalctl -u YOUR_APP-secrets-drift`.
 A hook that sends a message should drop root first, e.g. with
@@ -1579,7 +1581,9 @@ run_hooks() {
       say "skipping hook $h: not root-owned, or others can write to it"
       continue
     fi
-    timeout 60 "$h" "$@" || say "hook $h failed (exit $?)"
+    # SIGTERM after 60 seconds, SIGKILL 10 seconds later: a hook that
+    # ignores SIGTERM must not hold up the hooks after it.
+    timeout -k 10 60 "$h" "$@" || say "hook $h failed (exit $?)"
   done
 }
 

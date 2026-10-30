@@ -727,7 +727,7 @@ expect "drift .service keeps its RAM state between runs" grep -qx 'RuntimeDirect
 expect "installer checks for timeout, which the drift hooks run under" \
   grep -qE '^for tool in .* timeout .*; do$' "$INSTALLER"
 expect "rendered -secrets-drift runs hooks only with a time limit" \
-  [ "$(grep '"[$]h" "[$]@"' "$T/drift")" = '    timeout 60 "$h" "$@" || say "hook $h failed (exit $?)"' ]
+  [ "$(grep '"[$]h" "[$]@"' "$T/drift")" = '    timeout -k 10 60 "$h" "$@" || say "hook $h failed (exit $?)"' ]
 expect "installer enables the drift .path and .timer" \
   grep -qxF 'systemctl enable --now "${APP}-secrets-drift.path" "${APP}-secrets-drift.timer"' "$INSTALLER"
 
@@ -812,6 +812,20 @@ if [ "$(uname -s)" = Linux ]; then
   t "drift: in sync once the running .env has both lines again" 0 "*in sync again*" drift_run
   printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\n' > "$D/blob.plain"
   cp "$D/blob.plain" "$D/running.env"
+
+  # A hook that ignores SIGTERM is killed after the grace period and does
+  # not hold up the next hook (timeout cut down from 60+10 to 1+1 seconds).
+  sed 's/timeout -k 10 60 /timeout -k 1 1 /' "$D/drift" > "$D/drift.fast"
+  printf '#!/bin/sh\ntrap "" TERM\nsleep 600\n' > "$D/hooks/10-stuck"
+  chmod 755 "$D/hooks/10-stuck"
+  : > "$D/calls"
+  printf 'NEW_KEY=val-nnnn\n' >> "$D/running.env"
+  t "drift: a hook that ignores SIGTERM is killed, the failure is logged" 0 "*hook *10-stuck failed*" \
+    env PATH="$D/bin:$PATH" sh "$D/drift.fast"
+  expect "drift: the hook after the stuck one still ran" [ "$(calls)" = "drift myapp NEW_KEY" ]
+  rm -f "$D/hooks/10-stuck" "$D/drift.fast"
+  cp "$D/blob.plain" "$D/running.env"
+  drift_run > /dev/null 2>&1
 
   : > "$D/calls"
   printf 'NEW_KEY=val-nnnn\n' >> "$D/running.env"

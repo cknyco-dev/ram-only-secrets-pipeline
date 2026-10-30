@@ -1176,7 +1176,9 @@ run_hooks() {
       say "skipping hook \$h: not root-owned, or others can write to it"
       continue
     fi
-    timeout 60 "\$h" "\$@" || say "hook \$h failed (exit \$?)"
+    # SIGTERM after 60 seconds, SIGKILL 10 seconds later: a hook that
+    # ignores SIGTERM must not hold up the hooks after it.
+    timeout -k 10 60 "\$h" "\$@" || say "hook \$h failed (exit \$?)"
   done
 }
 
