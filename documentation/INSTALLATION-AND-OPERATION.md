@@ -371,7 +371,7 @@ group and the reading process must carry it (`documentation/COMPONENTS.md`
 Section 4.2). Switch zram swap on only
 after this, and only without a writeback device.
 
-### 5.5 Adding the drift check and the current helper scripts to an existing host
+### 5.5 Adding the drift check, the current helper scripts and the current guard to an existing host
 
 A host installed before the drift check (Section 4.6), or before
 `YOUR_APP-secrets-open` started from the blob (Section 4.4), keeps working
@@ -381,8 +381,11 @@ on an empty file and replace the bundle with whatever you type (Section
 5.4). Instead, expand the installer's own templates for the existing app.
 
 Finish or discard any edit in progress first
-(`/run/YOUR_APP-secrets-edit/env.edit` must not exist). Then, for each app
-on the host:
+(`/run/YOUR_APP-secrets-edit/env.edit` must not exist). The swap guard is
+regenerated too: the helper scripts mount the edit copy through it, and an
+older guard still caps that tmpfs at 2 MiB, too small for the three copies
+of a large bundle that `YOUR_APP-secrets-open` holds while it compares.
+Then, for each app on the host:
 
 ```bash
 # --- as root, from a checkout of this repository ---
@@ -396,18 +399,30 @@ render() {
     awk -v s="$1" -v e="$2" 'f && $0 == e {exit} f {print} $0 == s {f=1}' ram-only-secrets-install.sh
     echo "$2"; } | sh
 }
+{ echo '#!/bin/sh'
+  sed -n '/^# --- ros-lib begin ---$/,/^# --- ros-lib end ---$/p' ram-only-secrets-install.sh
+  echo 'ros_main "$@"'; } > "/usr/local/sbin/$APP-secrets-guard"
 render 'cat > "/usr/local/sbin/${APP}-secrets-open" <<SCRIPT_EOF' SCRIPT_EOF > "/usr/local/sbin/$APP-secrets-open"
 render 'cat > "/usr/local/sbin/${APP}-secrets-commit" <<SCRIPT_EOF' SCRIPT_EOF > "/usr/local/sbin/$APP-secrets-commit"
 render 'cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF' SCRIPT_EOF > "/usr/local/sbin/$APP-secrets-drift"
 for u in service path timer; do
   render "cat > \"/etc/systemd/system/\${APP}-secrets-drift.$u\" <<UNIT_EOF" UNIT_EOF > "/etc/systemd/system/$APP-secrets-drift.$u"
 done
-chmod 750 "/usr/local/sbin/$APP-secrets-open" "/usr/local/sbin/$APP-secrets-commit" "/usr/local/sbin/$APP-secrets-drift"
+chmod 750 "/usr/local/sbin/$APP-secrets-guard" "/usr/local/sbin/$APP-secrets-open" "/usr/local/sbin/$APP-secrets-commit" "/usr/local/sbin/$APP-secrets-drift"
+"/usr/local/sbin/$APP-secrets-guard" check
+# A leftover, empty edit tmpfs from an earlier commit (its umount can fail
+# on a busy mount) would be reused as it is, still at the old size. With
+# no edit in progress, drop it; -secrets-open mounts a new one.
+[ -e "/run/$APP-secrets-edit/env.edit" ] || { umount "/run/$APP-secrets-edit" 2>/dev/null; rmdir "/run/$APP-secrets-edit" 2>/dev/null; }
 install -d -m 0755 /etc/ram-only-secrets/drift.d
 systemctl daemon-reload
 systemctl enable --now "$APP-secrets-drift.path" "$APP-secrets-drift.timer"
 journalctl -u "$APP-secrets-drift" -n 5 --no-pager
 ```
+
+The `.env` tmpfs keeps its old 2 MiB cap until the next reboot (the unit
+reuses a mount that is already there). It holds one copy of the bundle,
+at most 1 MiB, so that is enough.
 
 Enabling the timer runs the check once right away, since its 10 minutes
 after boot are long past. If the running `.env` already differs from the

@@ -581,6 +581,19 @@ while IFS= read -r l; do
   expect "Section 5.2 runs: $l" grep -qxF "$l" "$T/setup52"
 done < "$T/enables"
 
+# Section 5.5, the upgrade of an existing host, regenerates the swap guard
+# (an old one still mounts the edit tmpfs with size=2m), checks it, and
+# drops a leftover edit tmpfs only when no edit is in progress.
+awk '/^### 5[.]5 / {f=1} /^## / {f=0} f' "$REPO/documentation/INSTALLATION-AND-OPERATION.md" > "$T/setup55"
+expect "Section 5.5 regenerates the guard from the ros-lib block" \
+  line_before "$T/setup55" "^  sed -n '/\\^# --- ros-lib begin" '> \"/usr/local/sbin/[$]APP-secrets-guard\"'
+expect "Section 5.5 makes the regenerated guard executable" \
+  grep -qF 'chmod 750 "/usr/local/sbin/$APP-secrets-guard" ' "$T/setup55"
+expect "Section 5.5 runs the guard check after regenerating it" \
+  line_before "$T/setup55" '^chmod 750 .*-secrets-guard' '^"/usr/local/sbin/[$]APP-secrets-guard" check$'
+expect "Section 5.5 drops a leftover edit tmpfs only when no edit is in progress" \
+  grep -qF '[ -e "/run/$APP-secrets-edit/env.edit" ] || { umount ' "$T/setup55"
+
 # render START END OUT [APP]: expand one of the installer's heredocs with
 # sample values, the same way the installer does at install time. APP is a
 # 4th argument, not a variable set before the call: sh (bash in POSIX
