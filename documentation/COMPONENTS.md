@@ -543,7 +543,7 @@ fi
 # it: running-.env lines only get committed once moved above the marker.
 MARK_LINE=$(grep -n -F -x -- "$MARK" "$EDIT_FILE" | head -n 1 | cut -d: -f1)
 if [ -n "$MARK_LINE" ]; then
-  head -n "$((MARK_LINE - 1))" "$EDIT_FILE" > "$EDIT_DIR/env.cut"
+  sed "${MARK_LINE},\$d" "$EDIT_FILE" > "$EDIT_DIR/env.cut"
   cat "$EDIT_DIR/env.cut" > "$EDIT_FILE"
   shred -u "$EDIT_DIR/env.cut"
   if [ ! -s "$EDIT_FILE" ]; then

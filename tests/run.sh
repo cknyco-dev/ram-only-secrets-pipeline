@@ -666,6 +666,8 @@ expect "-secrets-commit keeps what was moved above the marker" \
 expect "-secrets-commit leaves no cut file behind" [ ! -e "$T/ed/env.cut" ]
 printf '%s\nA_KEY=val-aaaa\n' "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")" > "$T/ed/env.edit"
 t "-secrets-commit refuses when nothing is above the marker" 1 "*refusing to commit an empty bundle*" cut_run
+expect "-secrets-commit cuts at the marker without head -n arithmetic" \
+  grep -qxF '  sed "${MARK_LINE},\$d" "$EDIT_FILE" > "$EDIT_DIR/env.cut"' "$T/commit"
 printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb%s\nNEW_KEY=val-nnnn\n' "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")" > "$T/ed/env.edit"
 cp "$T/ed/env.edit" "$T/ed/env.before"
 t "-secrets-commit refuses a marker that shares a line" 1 "*marker line*other text on the same line*refusing to commit*" cut_run
