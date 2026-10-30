@@ -581,11 +581,13 @@ while IFS= read -r l; do
   expect "Section 5.2 runs: $l" grep -qxF "$l" "$T/setup52"
 done < "$T/enables"
 
-# render START END OUT: expand one of the installer's heredocs with sample
-# values, the same way the installer does at install time.
+# render START END OUT [APP]: expand one of the installer's heredocs with
+# sample values, the same way the installer does at install time. APP is a
+# 4th argument, not a variable set before the call: sh (bash in POSIX
+# mode) and ksh keep such a variable after a function returns.
 render() {
   {
-    echo "APP=${RENDER_APP:-myapp} APP_USER=myuser APP_UID=1001 APP_HOME=/home/myuser"
+    echo "APP=${4:-myapp} APP_USER=myuser APP_UID=1001 APP_HOME=/home/myuser"
     echo "cat <<$2"
     awk -v s="$1" -v e="$2" 'f && $0 == e {exit} f {print} $0 == s {f=1}' "$INSTALLER"
     echo "$2"
@@ -602,9 +604,9 @@ render 'cat > "/etc/systemd/system/${APP}-secrets.service" <<UNIT_EOF' UNIT_EOF 
 # COMPONENTS.md Section 4.4 prints both helper scripts as generated for
 # APP=YOUR_APP; keep the two from drifting apart.
 # shellcheck disable=SC2016
-RENDER_APP=YOUR_APP render 'cat > "/usr/local/sbin/${APP}-secrets-open" <<SCRIPT_EOF' SCRIPT_EOF "$T/open.yours"
+render 'cat > "/usr/local/sbin/${APP}-secrets-open" <<SCRIPT_EOF' SCRIPT_EOF "$T/open.yours" YOUR_APP
 # shellcheck disable=SC2016
-RENDER_APP=YOUR_APP render 'cat > "/usr/local/sbin/${APP}-secrets-commit" <<SCRIPT_EOF' SCRIPT_EOF "$T/commit.yours"
+render 'cat > "/usr/local/sbin/${APP}-secrets-commit" <<SCRIPT_EOF' SCRIPT_EOF "$T/commit.yours" YOUR_APP
 for h in open commit; do
   awk -v b="<!-- helper-$h: begin -->" -v e="<!-- helper-$h: end -->" \
     '$0 == b {f=1; next} $0 == e {f=0} f' "$COMPONENTS" |
@@ -641,6 +643,8 @@ awk '/^if \[ -f "[$]RUNNING_ENV" \]; then$/ {f=1} f {print} f && /^fi$/ {exit}' 
 mkdir -p "$T/ed"
 printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\n' > "$T/ed/env.edit"
 printf 'A_KEY=val-aaaa\nB_KEY=val-CHANGED\n# a comment\n\nNEW_KEY=val-nnnn\n' > "$T/running.env"
+# The variables and the shred stand-in are for the sourced fixture script.
+# shellcheck disable=SC2034,SC2329,SC1091
 cmp_run() {
   EDIT_DIR=$T/ed EDIT_FILE=$T/ed/env.edit RUNNING_ENV=$T/running.env
   MARK=$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/open")
@@ -668,6 +672,7 @@ cmp_run > /dev/null 2>&1
 # -secrets-commit from the marker cut up to the encryption, run against
 # fixture files.
 awk '/^systemd-creds encrypt / {exit} /^MARK_LINE=/ {f=1} f {print}' "$T/commit" > "$T/cut.sh"
+# shellcheck disable=SC2034,SC2329,SC1091
 cut_run() {
   EDIT_DIR=$T/ed EDIT_FILE=$T/ed/env.edit
   MARK=$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")
@@ -729,9 +734,9 @@ expect "installer enables the drift .path and .timer" \
 # COMPONENTS.md Section 4.6 prints the drift script and its units as
 # generated for APP=YOUR_APP; keep them from drifting apart.
 # shellcheck disable=SC2016
-RENDER_APP=YOUR_APP render 'cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF' SCRIPT_EOF "$T/drift-script.yours"
+render 'cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF' SCRIPT_EOF "$T/drift-script.yours" YOUR_APP
 for u in service path timer; do
-  RENDER_APP=YOUR_APP render "cat > \"/etc/systemd/system/\${APP}-secrets-drift.$u\" <<UNIT_EOF" UNIT_EOF "$T/drift-$u.yours"
+  render "cat > \"/etc/systemd/system/\${APP}-secrets-drift.$u\" <<UNIT_EOF" UNIT_EOF "$T/drift-$u.yours" YOUR_APP
 done
 for k in script service path timer; do
   awk -v b="<!-- drift-$k: begin -->" -v e="<!-- drift-$k: end -->" \
