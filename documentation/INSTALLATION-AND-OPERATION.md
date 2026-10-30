@@ -155,8 +155,9 @@ setup below.
 ```bash
 # --- as root ---
 
-# 1. Install the swap guard from Section 4.5 and the two helper scripts
-#    from Section 4.4, and make them executable. Rather than pasting the
+# 1. Install the swap guard from Section 4.5, the two helper scripts from
+#    Section 4.4 and the drift check from Section 4.6, and make them
+#    executable. Rather than pasting the
 #    guard's few hundred lines, you can copy it out of the installer:
 #      { echo '#!/bin/sh'
 #        sed -n '/^# --- ros-lib begin ---$/,/^# --- ros-lib end ---$/p' ram-only-secrets-install.sh
@@ -164,13 +165,19 @@ setup below.
 nano /usr/local/sbin/YOUR_APP-secrets-guard
 nano /usr/local/sbin/YOUR_APP-secrets-open
 nano /usr/local/sbin/YOUR_APP-secrets-commit
-chmod 750 /usr/local/sbin/YOUR_APP-secrets-guard /usr/local/sbin/YOUR_APP-secrets-open /usr/local/sbin/YOUR_APP-secrets-commit
+nano /usr/local/sbin/YOUR_APP-secrets-drift
+chmod 750 /usr/local/sbin/YOUR_APP-secrets-guard /usr/local/sbin/YOUR_APP-secrets-open /usr/local/sbin/YOUR_APP-secrets-commit /usr/local/sbin/YOUR_APP-secrets-drift
 # Then run the same check the installer runs first:
 /usr/local/sbin/YOUR_APP-secrets-guard check
 # expect: "... swap check passed: ...". A refusal names what to fix.
 
-# 2. Install the systemd unit from Section 4.2.
+# 2. Install the systemd unit from Section 4.2, the drift check's three
+#    units from Section 4.6, and the (empty) directory for its hooks.
 nano /etc/systemd/system/YOUR_APP-secrets.service
+nano /etc/systemd/system/YOUR_APP-secrets-drift.service
+nano /etc/systemd/system/YOUR_APP-secrets-drift.path
+nano /etc/systemd/system/YOUR_APP-secrets-drift.timer
+install -d -m 0755 /etc/ram-only-secrets/drift.d
 
 # 3. Create the encrypted-credentials directory if it doesn't exist yet.
 install -d -m 0755 /etc/credstore.encrypted
@@ -201,8 +208,11 @@ umount /run/YOUR_APP-secrets-edit; rmdir /run/YOUR_APP-secrets-edit
 # (umount fails harmlessly where both mounts were refused and it stayed a plain directory)
 
 # 5. Enable and start the unit -- this performs the first decrypt into RAM.
+#    Then switch on the drift check: its .path unit watches the running
+#    .env, its timer repeats the check hourly (Section 4.6).
 systemctl daemon-reload
 systemctl enable --now YOUR_APP-secrets.service
+systemctl enable --now YOUR_APP-secrets-drift.path YOUR_APP-secrets-drift.timer
 
 # 6. Verify.
 systemctl status YOUR_APP-secrets.service

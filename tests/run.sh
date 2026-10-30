@@ -567,6 +567,20 @@ sed '1d;$d' "$T/guard.manual" > "$T/guard.manual.body"
 expect "manual copy command from Section 5.4 copies the block unchanged" \
   cmp -s "$T/lib.sh" "$T/guard.manual.body"
 
+# INSTALLATION-AND-OPERATION.md Section 5.2, the manual one-time setup,
+# installs every file the installer writes, the hook directory included,
+# and enables every unit the installer enables.
+awk '/^### 5[.]2 / {f=1} /^### 5[.]3 / {f=0} f' "$REPO/documentation/INSTALLATION-AND-OPERATION.md" > "$T/setup52"
+for p in /usr/local/sbin/YOUR_APP-secrets-guard $(sed -n 's#^cat > "\(/[^"]*\)" <<.*#\1#p' "$INSTALLER" | sed 's/[$]{APP}/YOUR_APP/'); do
+  expect "Section 5.2 installs $p" grep -qxF "nano $p" "$T/setup52"
+done
+expect "Section 5.2 creates the drift hook directory" \
+  grep -qxF 'install -d -m 0755 /etc/ram-only-secrets/drift.d' "$T/setup52"
+grep '^systemctl enable --now ' "$INSTALLER" | sed -e 's/"//g' -e 's/[$]{APP}/YOUR_APP/g' > "$T/enables"
+while IFS= read -r l; do
+  expect "Section 5.2 runs: $l" grep -qxF "$l" "$T/setup52"
+done < "$T/enables"
+
 # render START END OUT: expand one of the installer's heredocs with sample
 # values, the same way the installer does at install time.
 render() {
