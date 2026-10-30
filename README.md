@@ -50,6 +50,10 @@ Generic and app-agnostic — drop it in front of any app that reads a
   `*-secrets-commit`) so there is exactly one way to edit secrets, ever,
   and it always ends by printing a fresh backup blob so that step is
   impossible to skip.
+- **Drift alerts** — if anything writes into the running `.env`, a
+  watcher reports which names now differ from the encrypted bundle, by
+  name only, never a value, in the journal and through your own hooks
+  ([`documentation/COMPONENTS.md` §4.6](documentation/COMPONENTS.md#46-the-drift-check-noticing-what-changed-the-running-env)).
 - **Shell-history and scrollback leak protection built in** — every step
   that touches real secret values is designed so nothing lands in
   `.bash_history`/`.zsh_history`, with explicit history-clear prompts
@@ -189,9 +193,13 @@ sudo sh -c 'echo 0 > /proc/$$/coredump_filter && exec nano /run/YOUR_APP-secrets
 sudo YOUR_APP-secrets-commit
 ```
 
-The edit copy lives on its own `noswap` tmpfs, and the `sh -c` wrapper
-keeps `nano`'s memory out of core dumps; keep the single quotes, so that
-`$$` is the new shell's PID and not your own
+The edit copy starts from the encrypted bundle, not from the running
+`.env`; whatever an application wrote into the running `.env` since the
+last commit is listed by name and placed below a marker line, and only
+what you move above that line gets committed. The edit copy lives on its
+own `noswap` tmpfs, and the `sh -c` wrapper keeps `nano`'s memory out of
+core dumps; keep the single quotes, so that `$$` is the new shell's PID
+and not your own
 ([`documentation/COMPONENTS.md` §4.4](documentation/COMPONENTS.md#44-the-helper-scripts--the-actual-files-not-just-a-description)).
 
 `YOUR_APP-secrets-commit` ends by printing a fresh checksum and base64

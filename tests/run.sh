@@ -608,8 +608,158 @@ for h in open commit; do
   expect "rendered -secrets-$h reports the .env's noswap status" \
     grep -qxF '"$GUARD" status "/run/myapp-secrets" || true' "$T/$h"
 done
-expect "rendered -secrets-open mounts the edit tmpfs before copying" \
-  line_before "$T/open" '^"[$]GUARD" mount "[$]EDIT_DIR" [|][|] exit 1$' '^  cp "[$]RUNNING_ENV"'
+expect "rendered -secrets-open mounts the edit tmpfs before decrypting" \
+  line_before "$T/open" '^"[$]GUARD" mount "[$]EDIT_DIR" [|][|] exit 1$' '^  systemd-creds decrypt '
+expect "rendered -secrets-open starts from the blob, not the running .env" \
+  grep -qxF '  systemd-creds decrypt --name=myapp-env "$BLOB" "$EDIT_FILE"' "$T/open"
+expect "rendered -secrets-open no longer copies the running .env" \
+  not_grep -F 'cp "$RUNNING_ENV"' "$T/open"
+expect "rendered -secrets-open and -commit use the same marker line" \
+  [ "$(grep '^MARK=' "$T/open")" = "$(grep '^MARK=' "$T/commit")" ]
+expect "rendered -secrets-open never puts a blob value on a command line" \
+  grep -qF 'grep -Fxv -f "$EDIT_FILE" "$RUNNING_ENV"' "$T/open"
+
+# The comparison block of -secrets-open, run against fixture files: names
+# only on screen, the running .env's extra lines below the marker.
+awk '/^if \[ -f "[$]RUNNING_ENV" \]; then$/ {f=1} f {print} f && /^fi$/ {exit}' "$T/open" > "$T/cmp.sh"
+mkdir -p "$T/ed"
+printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\n' > "$T/ed/env.edit"
+printf 'A_KEY=val-aaaa\nB_KEY=val-CHANGED\n# a comment\n\nNEW_KEY=val-nnnn\n' > "$T/running.env"
+cmp_run() {
+  EDIT_DIR=$T/ed EDIT_FILE=$T/ed/env.edit RUNNING_ENV=$T/running.env
+  MARK=$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/open")
+  shred() { shift; rm -f "$@"; }  # shred is not on every test host
+  . "$T/cmp.sh"
+}
+t "-secrets-open lists differing names, never values" 0 "*only in the running .env:*NEW_KEY*different value in the running:*B_KEY*not in the running .env (kept):*C_KEY*" cmp_run
+expect "-secrets-open printed no value" not_grep -E 'val-' "$T/out"
+expect "-secrets-open appends the running lines below the marker" \
+  [ "$(sed -n '/^#### myapp-secrets-open: /,$p' "$T/ed/env.edit" | grep -v '^#')" = "$(printf 'B_KEY=val-CHANGED\nNEW_KEY=val-nnnn')" ]
+expect "-secrets-open keeps the blob's lines above the marker" \
+  [ "$(sed '/^#### myapp-secrets-open: /,$d' "$T/ed/env.edit")" = "$(printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc')" ]
+expect "-secrets-open leaves no helper file behind" [ ! -e "$T/ed/ram-only" ]
+
+# The marker cut of -secrets-commit, run against fixture files.
+awk '/^MARK_LINE=/ {f=1} f {print} f && /^fi$/ {exit}' "$T/commit" > "$T/cut.sh"
+cut_run() {
+  EDIT_DIR=$T/ed EDIT_FILE=$T/ed/env.edit
+  MARK=$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")
+  shred() { shift; rm -f "$@"; }
+  . "$T/cut.sh"
+}
+sed '/^NEW_KEY=/d' "$T/ed/env.edit" | sed '/^#### myapp-secrets-open: /i\
+NEW_KEY=val-nnnn' > "$T/ed/env.new" && mv "$T/ed/env.new" "$T/ed/env.edit"
+t "-secrets-commit drops the marker and everything below it" 0 '*' cut_run
+expect "-secrets-commit keeps what was moved above the marker" \
+  [ "$(cat "$T/ed/env.edit")" = "$(printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\nNEW_KEY=val-nnnn')" ]
+expect "-secrets-commit leaves no cut file behind" [ ! -e "$T/ed/env.cut" ]
+printf '%s\nA_KEY=val-aaaa\n' "$(sed -n "s/^MARK='\(.*\)'$/\1/p" "$T/commit")" > "$T/ed/env.edit"
+t "-secrets-commit refuses when nothing is above the marker" 1 "*refusing to commit an empty bundle*" cut_run
+
+echo "# drift check (Section 4.6)"
+
+# shellcheck disable=SC2016
+render 'cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF' SCRIPT_EOF "$T/drift"
+# shellcheck disable=SC2016
+render 'cat > "/etc/systemd/system/${APP}-secrets-drift.service" <<UNIT_EOF' UNIT_EOF "$T/drift.service"
+# shellcheck disable=SC2016
+render 'cat > "/etc/systemd/system/${APP}-secrets-drift.path" <<UNIT_EOF' UNIT_EOF "$T/drift.path"
+# shellcheck disable=SC2016
+render 'cat > "/etc/systemd/system/${APP}-secrets-drift.timer" <<UNIT_EOF' UNIT_EOF "$T/drift.timer"
+expect "rendered -secrets-drift passes sh -n" sh -n "$T/drift"
+expect "rendered -secrets-drift clears coredump_filter before it decrypts" \
+  line_before "$T/drift" '^if \[ -e /proc/[$][$]/coredump_filter \]' '^blob\(\) \{ systemd-creds decrypt'
+expect "rendered -secrets-drift runs the swap guard before it decrypts" \
+  line_before "$T/drift" '^"[$]GUARD" check ' '^blob > /dev/null'
+expect "rendered -secrets-drift reads the blob's lines as patterns from a pipe" \
+  grep -qF 'blob | grep -Fxv -f - "$RUNNING_ENV"' "$T/drift"
+expect "drift .path watches the running .env" grep -qx 'PathChanged=/run/myapp-secrets/.env' "$T/drift.path"
+expect "drift .path is set up after the noswap tmpfs is mounted" grep -qx 'After=myapp-secrets.service' "$T/drift.path"
+expect "drift .path starts the drift service" grep -qx 'Unit=myapp-secrets-drift.service' "$T/drift.path"
+expect "drift .timer runs hourly" grep -qx 'OnUnitActiveSec=1h' "$T/drift.timer"
+expect "drift .service waits for a burst of writes to settle" \
+  grep -qx 'ExecStart=/usr/local/sbin/myapp-secrets-drift --wait 15' "$T/drift.service"
+expect "drift .service clears coredump_filter" grep -qx 'CoredumpFilter=0' "$T/drift.service"
+expect "drift .service keeps its RAM state between runs" grep -qx 'RuntimeDirectoryPreserve=yes' "$T/drift.service"
+expect "installer enables the drift .path and .timer" \
+  grep -qxF 'systemctl enable --now "${APP}-secrets-drift.path" "${APP}-secrets-drift.timer"' "$INSTALLER"
+
+# COMPONENTS.md Section 4.6 prints the drift script and its units as
+# generated for APP=YOUR_APP; keep them from drifting apart.
+# shellcheck disable=SC2016
+RENDER_APP=YOUR_APP render 'cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF' SCRIPT_EOF "$T/drift-script.yours"
+for u in service path timer; do
+  RENDER_APP=YOUR_APP render "cat > \"/etc/systemd/system/\${APP}-secrets-drift.$u\" <<UNIT_EOF" UNIT_EOF "$T/drift-$u.yours"
+done
+for k in script service path timer; do
+  awk -v b="<!-- drift-$k: begin -->" -v e="<!-- drift-$k: end -->" \
+    '$0 == b {f=1; next} $0 == e {f=0} f' "$COMPONENTS" |
+    sed '1{/^```/d;}' | sed '${/^```/d;}' > "$T/drift-$k.doc"
+  expect "COMPONENTS.md Section 4.6 prints the drift $k as generated" cmp -s "$T/drift-$k.yours" "$T/drift-$k.doc"
+done
+
+# The rendered script, run against fixture files with fake root tools:
+# systemd-creds prints the fixture "blob", the guard passes, id says root.
+if [ "$(uname -s)" = Linux ]; then
+  D=$T/drift-fx
+  mkdir -p "$D/bin" "$D/hooks" "$D/state"
+  printf '#!/bin/sh\n[ -e "%s/decrypt-fails" ] && exit 1\ncat "%s/blob.plain"\n' "$D" "$D" > "$D/bin/systemd-creds"
+  printf '#!/bin/sh\necho 0\n' > "$D/bin/id"
+  printf '#!/bin/sh\nexit 0\n' > "$D/bin/logger"
+  printf '#!/bin/sh\nexit 0\n' > "$D/guard"
+  printf '#!/bin/sh\necho "$*" >> "%s/calls"\n' "$D" > "$D/hooks/50-record"
+  chmod 755 "$D/bin/systemd-creds" "$D/bin/id" "$D/bin/logger" "$D/guard" "$D/hooks/50-record"
+  chmod 755 "$D/hooks"
+  sed -e "s|^BLOB=.*|BLOB=$D/blob.enc|" -e "s|^RUNNING_ENV=.*|RUNNING_ENV=$D/running.env|" \
+      -e "s|^GUARD=.*|GUARD=$D/guard|" -e "s|^HOOK_DIR=.*|HOOK_DIR=$D/hooks|" \
+      -e "s|^HOOK_OWNER=.*|HOOK_OWNER=$(id -u)|" -e "s|^STATE=.*|STATE=$D/state/myapp|" "$T/drift" > "$D/drift"
+  : > "$D/blob.enc"
+  printf 'A_KEY=val-aaaa\nB_KEY=val-bbbb\nC_KEY=val-cccc\n' > "$D/blob.plain"
+  drift_run() { PATH=$D/bin:$PATH sh "$D/drift"; }
+  # The hook gets empty name lists as empty arguments; "$*" pads them.
+  calls() { sed 's/ *$//' "$D/calls" 2>/dev/null; }
+
+  cp "$D/blob.plain" "$D/running.env"
+  t "drift: in sync, silent" 0 '' drift_run
+  expect "drift: in sync, no hook" [ -z "$(calls)" ]
+
+  printf 'A_KEY=val-aaaa\nB_KEY=val-CHANGED\n# comment\nNEW_KEY=val-nnnn\n' > "$D/running.env"
+  t "drift: new drift is reported by name" 0 \
+    "*only in the running .env: NEW_KEY; different value there: B_KEY; missing there: C_KEY*" drift_run
+  expect "drift: no value in the output" not_grep -E 'val-' "$T/out"
+  expect "drift: hook gets event, app and names only" [ "$(calls)" = "drift myapp NEW_KEY B_KEY C_KEY" ]
+  expect "drift: no value reaches a hook" not_grep -E 'val-' "$D/calls"
+
+  : > "$D/calls"
+  t "drift: the same drift again is not reported again" 0 '' drift_run
+  expect "drift: no hook for drift already reported" [ -z "$(calls)" ]
+
+  printf 'A_KEY=val-aaaa\nB_KEY=val-CHANGED-AGAIN\n# comment\nNEW_KEY=val-nnnn\n' > "$D/running.env"
+  t "drift: a second change to the same name is reported" 0 "*different value there: B_KEY*" drift_run
+  expect "drift: hook called for the second change" [ "$(calls)" = "drift myapp NEW_KEY B_KEY C_KEY" ]
+
+  : > "$D/calls"
+  cp "$D/blob.plain" "$D/running.env"
+  t "drift: back in sync is reported once" 0 "*in sync again*" drift_run
+  expect "drift: hook gets the resolved event" [ "$(calls)" = "resolved myapp" ]
+  : > "$D/calls"
+  t "drift: in sync after resolved, silent" 0 '' drift_run
+  expect "drift: no second resolved" [ -z "$(calls)" ]
+
+  : > "$D/decrypt-fails"
+  t "drift: a failed decrypt is an error, not drift" 1 "*error: cannot decrypt*" drift_run
+  expect "drift: hook gets the error event" [ "$(calls)" = "error myapp" ]
+  rm -f "$D/decrypt-fails"
+
+  : > "$D/calls"
+  printf 'NEW_KEY=val-nnnn\n' >> "$D/running.env"
+  chmod 777 "$D/hooks/50-record"
+  t "drift: a hook others can write to is skipped" 0 "*skipping hook*" drift_run
+  expect "drift: the skipped hook did not run" [ -z "$(calls)" ]
+  chmod 755 "$D/hooks/50-record"
+else
+  skipped "drift check against fixtures" "needs Linux stat, find -perm and coreutils"
+fi
 expect "rendered -secrets-open refuses a leftover /dev/shm edit" \
   line_before "$T/open" '^if \[ -e "[$]OLD_EDIT_FILE" \]' '^"[$]GUARD" mount'
 sh -c "$(grep -E '^EDIT_FILE=|sudo sh -c' "$T/open")" > "$T/out" 2>&1

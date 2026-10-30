@@ -5,8 +5,9 @@
 Sections 5.1 and 5.2 below are automated end-to-end by
 `ram-only-secrets-install.sh`, shipped alongside this document. It performs
 every check and every step described in 5.1/5.2 — including generating
-the swap guard (Section 4.5), both helper scripts (Section 4.4) and the
-systemd unit (Section 4.2) itself, with your app name/user/UID
+the swap guard (Section 4.5), both helper scripts (Section 4.4), the
+drift check (Section 4.6) and the systemd unit (Section 4.2) itself, with
+your app name/user/UID
 substituted in automatically — and stops only for the one step that has
 to stay interactive: filling in your actual secret values in `nano`.
 
@@ -175,7 +176,7 @@ nano /etc/systemd/system/YOUR_APP-secrets.service
 install -d -m 0755 /etc/credstore.encrypted
 
 # 4. First-ever encrypt: prepare the initial bundle directly, since no
-#    running RAM copy exists yet for YOUR_APP-secrets-open to seed from.
+#    blob exists yet for YOUR_APP-secrets-open to start from.
 #    IMPORTANT: this heredoc is shown with placeholder values for
 #    illustration only. Do NOT type your real secret values into a heredoc
 #    or an echo/printf command at an interactive prompt -- an interactive
@@ -293,6 +294,22 @@ the edit copy stays where it is, on its `noswap` tmpfs, and the script
 says so; fix what it names and run it again, or discard the edit with
 `shred -u`.
 
+The edit copy starts from the blob, not from the running `.env`. If the
+running `.env` was changed since the last commit (an application writing
+its own settings through its symlink, for example), `YOUR_APP-secrets-open`
+lists the names that differ, never the values, and appends the running
+`.env`'s lines below a marker line at the end of the edit copy. Move a
+line above the marker to keep it; `YOUR_APP-secrets-commit` drops
+everything from the marker down (Section 4.4).
+
+You don't have to wait for your next edit to learn about such a change:
+the drift check (Section 4.6) reports it by name within seconds, in the
+journal (`journalctl -u YOUR_APP-secrets-drift`) and through any hook in
+`/etc/ram-only-secrets/drift.d/`. To deal with a report, run
+`YOUR_APP-secrets-open` as above, decide which listed lines to keep, and
+commit. The commit rewrites the running `.env` from the new blob, and the
+check reports once that both match again.
+
 `YOUR_APP-secrets-commit`'s own output ends with the fresh checksum and the
 fresh base64 blob — that output *is* the next step: copy it into your
 password manager immediately (Section 7). The blob changes on every commit,
@@ -343,3 +360,45 @@ YOUR_APP_USER`), so there the application user must be a member of that
 group and the reading process must carry it (`documentation/COMPONENTS.md`
 Section 4.2). Switch zram swap on only
 after this, and only without a writeback device.
+
+### 5.5 Adding the drift check and the current helper scripts to an existing host
+
+A host installed before the drift check (Section 4.6), or before
+`YOUR_APP-secrets-open` started from the blob (Section 4.4), keeps working
+unchanged. Moving it to the current version doesn't touch the encrypted
+bundle either. Don't re-run the installer for this: it would open `nano`
+on an empty file and replace the bundle with whatever you type (Section
+5.4). Instead, expand the installer's own templates for the existing app.
+
+Finish or discard any edit in progress first
+(`/run/YOUR_APP-secrets-edit/env.edit` must not exist). Then, for each app
+on the host:
+
+```bash
+# --- as root, from a checkout of this repository ---
+APP=YOUR_APP APP_USER=YOUR_APP_USER
+APP_UID=$(id -u "$APP_USER") APP_HOME=$(getent passwd "$APP_USER" | cut -d: -f6)
+# render START END: one of the installer's heredocs, expanded for this app,
+# the same way the installer expands it at install time.
+render() {
+  { echo "APP=$APP APP_USER=$APP_USER APP_UID=$APP_UID APP_HOME=$APP_HOME"
+    echo "cat <<$2"
+    awk -v s="$1" -v e="$2" 'f && $0 == e {exit} f {print} $0 == s {f=1}' ram-only-secrets-install.sh
+    echo "$2"; } | sh
+}
+render 'cat > "/usr/local/sbin/${APP}-secrets-open" <<SCRIPT_EOF' SCRIPT_EOF > "/usr/local/sbin/$APP-secrets-open"
+render 'cat > "/usr/local/sbin/${APP}-secrets-commit" <<SCRIPT_EOF' SCRIPT_EOF > "/usr/local/sbin/$APP-secrets-commit"
+render 'cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF' SCRIPT_EOF > "/usr/local/sbin/$APP-secrets-drift"
+for u in service path timer; do
+  render "cat > \"/etc/systemd/system/\${APP}-secrets-drift.$u\" <<UNIT_EOF" UNIT_EOF > "/etc/systemd/system/$APP-secrets-drift.$u"
+done
+chmod 750 "/usr/local/sbin/$APP-secrets-open" "/usr/local/sbin/$APP-secrets-commit" "/usr/local/sbin/$APP-secrets-drift"
+install -d -m 0755 /etc/ram-only-secrets/drift.d
+systemctl daemon-reload
+systemctl enable --now "$APP-secrets-drift.path" "$APP-secrets-drift.timer"
+journalctl -u "$APP-secrets-drift" -n 5 --no-pager
+```
+
+Enabling the timer runs the check once right away, since its 10 minutes
+after boot are long past. If the running `.env` already differs from the
+blob, that first run reports it; otherwise it stays quiet.
