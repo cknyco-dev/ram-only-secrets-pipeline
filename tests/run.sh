@@ -701,6 +701,10 @@ expect "drift .service waits for a burst of writes to settle" \
   grep -qx 'ExecStart=/usr/local/sbin/myapp-secrets-drift --wait 15' "$T/drift.service"
 expect "drift .service clears coredump_filter" grep -qx 'CoredumpFilter=0' "$T/drift.service"
 expect "drift .service keeps its RAM state between runs" grep -qx 'RuntimeDirectoryPreserve=yes' "$T/drift.service"
+expect "installer checks for timeout, which the drift hooks run under" \
+  grep -qE '^for tool in .* timeout .*; do$' "$INSTALLER"
+expect "rendered -secrets-drift runs hooks only with a time limit" \
+  [ "$(grep '"[$]h" "[$]@"' "$T/drift")" = '    timeout 60 "$h" "$@" || say "hook $h failed (exit $?)"' ]
 expect "installer enables the drift .path and .timer" \
   grep -qxF 'systemctl enable --now "${APP}-secrets-drift.path" "${APP}-secrets-drift.timer"' "$INSTALLER"
 

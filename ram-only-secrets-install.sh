@@ -727,7 +727,7 @@ if ! command -v systemd-creds >/dev/null 2>&1; then
   FAIL=1
 fi
 
-for tool in shred base64 sha256sum install stat readlink getent nano systemctl; do
+for tool in shred base64 sha256sum install stat readlink timeout getent nano systemctl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "MISSING: $tool" >&2
     FAIL=1

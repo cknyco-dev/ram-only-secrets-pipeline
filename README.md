@@ -133,7 +133,7 @@ unit, the env-file symlink, and the two helper scripts in full — in
   `adduser`/`useradd`): on a ramfs, `.env` belongs to root and is readable
   by that group (`documentation/COMPONENTS.md` Section 4.2).
 - Standard coreutils: `shred`, `base64`, `sha256sum`, `install`, `stat`,
-  `readlink`, plus `getent` (from glibc; package `libc-bin` on Debian and
+  `readlink`, `timeout` (the drift check's hooks run under it), plus `getent` (from glibc; package `libc-bin` on Debian and
   Ubuntu) and `nano`. GNU coreutils and the Rust uutils that Ubuntu 26.04
   installs by default both work.
 - An unprivileged application user already created, and root/sudo access
@@ -154,7 +154,7 @@ grep . /sys/kernel/kexec/crash_loaded /sys/kernel/kexec/crash_size \
 uname -r
 systemctl --version | head -1
 which systemd-creds && systemd-creds --version
-which shred base64 sha256sum install stat readlink getent nano
+which shred base64 sha256sum install stat readlink timeout getent nano
 ```
 
 Missing something? See

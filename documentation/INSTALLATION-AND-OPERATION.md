@@ -115,7 +115,7 @@ systemd-creds has-tpm2 || echo "no TPM2 -- host-only key will be used, which is 
 # The plain coreutils this pipeline relies on (GNU or Ubuntu 26.04's
 # uutils), plus getent (from glibc, package libc-bin) and nano -- present
 # on virtually every Linux install already, confirm rather than assume:
-which shred base64 sha256sum install stat readlink getent nano
+which shred base64 sha256sum install stat readlink timeout getent nano
 ```
 
 `systemd-creds` needs systemd 250 or newer. Ubuntu 22.04 (systemd 249)
