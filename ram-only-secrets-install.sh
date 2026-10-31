@@ -171,13 +171,17 @@ ros_same_mount_ns() {
   [ -n "$ros_ns_self" ] && [ "$ros_ns_self" = "$ros_ns_init" ]
 }
 ros_pause() { sleep 1; }
-# size=2m: one systemd credential may be up to 1 MiB (CREDENTIAL_SIZE_MAX,
-# systemd v259 src/shared/creds-util.h:12). mode=0700 keeps the directory
-# root-only until the unit's next ExecStart= line hands it to
-# YOUR_APP_USER, the same step that ran before this mount existed (on a
-# ramfs, that line keeps root as the owner instead; see below).
+# size=4m: one systemd credential may be up to 1 MiB (CREDENTIAL_SIZE_MAX,
+# systemd v259 src/shared/creds-util.h:12), and while YOUR_APP-secrets-open
+# compares, the edit tmpfs holds up to three copies of a bundle that size
+# (the edit copy, the running-only lines, and those lines again appended
+# below the marker). tmpfs takes RAM only for what is written. mode=0700
+# keeps the directory root-only until the unit's next ExecStart= line
+# hands it to YOUR_APP_USER, the same step that ran before this mount
+# existed (on a ramfs, that line keeps root as the owner instead; see
+# below).
 ros_mount_noswap() {
-  mount -t tmpfs -o noswap,size=2m,nr_inodes=16,mode=0700,nosuid,nodev,noexec tmpfs "$1"
+  mount -t tmpfs -o noswap,size=4m,nr_inodes=16,mode=0700,nosuid,nodev,noexec tmpfs "$1"
 }
 # ramfs where noswap is unavailable (kernel older than 6.4, or the noswap
 # mount refused). Its pages are never swapped: ramfs_get_inode() marks every
@@ -727,7 +731,7 @@ if ! command -v systemd-creds >/dev/null 2>&1; then
   FAIL=1
 fi
 
-for tool in shred base64 sha256sum install stat readlink getent nano systemctl; do
+for tool in shred base64 sha256sum install stat readlink timeout getent nano systemctl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "MISSING: $tool" >&2
     FAIL=1
@@ -826,8 +830,11 @@ EDIT_DIR=/run/${APP}-secrets-edit
 EDIT_FILE=/run/${APP}-secrets-edit/env.edit
 OLD_EDIT_FILE=/dev/shm/${APP}-env.edit
 RUNNING_ENV=/run/${APP}-secrets/.env
+BLOB=/etc/credstore.encrypted/${APP}-env
 GUARD=/usr/local/sbin/${APP}-secrets-guard
 INSTALLER=/root/ram-only-secrets-install.sh
+# Same string in ${APP}-secrets-commit, which drops this line and all below it.
+MARK='#### ${APP}-secrets-open: everything from this line down is NOT committed ####'
 
 if [ "\$(id -u)" -ne 0 ]; then
   echo "Run as root (sudo \$0)" >&2
@@ -872,12 +879,58 @@ fi
 "\$GUARD" mount "\$EDIT_DIR" || exit 1
 install -d -m 0700 "\$EDIT_DIR"
 
-if [ -f "\$RUNNING_ENV" ]; then
-  cp "\$RUNNING_ENV" "\$EDIT_FILE"
+# Start from the blob, not from the running .env: whatever was written into
+# the running .env since the last commit (an application saving its own
+# settings there, for example) must not slip into the next commit unseen.
+if [ -f "\$BLOB" ]; then
+  systemd-creds decrypt --name=${APP}-env "\$BLOB" "\$EDIT_FILE"
 else
   : > "\$EDIT_FILE"
 fi
 chmod 600 "\$EDIT_FILE"
+
+# Report what differs between the running .env and the blob, by NAME only.
+# Values go neither to the screen nor onto a command line, where any local
+# user can read them in /proc/PID/cmdline (proc(5)): grep reads the blob's
+# lines as patterns from the file. The running .env's lines are appended
+# below MARK; what is moved above MARK gets committed, the rest is dropped
+# by ${APP}-secrets-commit.
+if [ -f "\$RUNNING_ENV" ]; then
+  RAM_ONLY="\$EDIT_DIR/ram-only"
+  grep -Fxv -f "\$EDIT_FILE" "\$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*\$' > "\$RAM_ONLY" || true
+  env_names() { sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "\$1" | sort -u; }
+  has_name() { grep -q "^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\$1=" "\$2"; }
+  ADDED="" CHANGED="" MISSING=""
+  for n in \$(env_names "\$RAM_ONLY"); do
+    if has_name "\$n" "\$EDIT_FILE"; then CHANGED="\$CHANGED \$n"; else ADDED="\$ADDED \$n"; fi
+  done
+  for n in \$(env_names "\$EDIT_FILE"); do
+    if ! has_name "\$n" "\$RUNNING_ENV"; then MISSING="\$MISSING \$n"; fi
+  done
+  if [ -n "\$ADDED\$CHANGED\$MISSING" ]; then
+    echo
+    echo "The running .env differs from the blob (changed since the last commit):"
+    if [ -n "\$ADDED" ]; then echo "  only in the running .env:        \$ADDED"; fi
+    if [ -n "\$CHANGED" ]; then echo "  different value in the running:  \$CHANGED"; fi
+    if [ -n "\$MISSING" ]; then echo "  not in the running .env (kept):  \$MISSING"; fi
+  fi
+  if [ -s "\$RAM_ONLY" ]; then
+    # The marker must start a line of its own: appended to a last line
+    # without a newline, ${APP}-secrets-commit would not find it.
+    if [ -s "\$EDIT_FILE" ] && ! tail -c 1 "\$EDIT_FILE" | grep -q '^\$'; then
+      echo >> "\$EDIT_FILE"
+    fi
+    {
+      echo "\$MARK"
+      echo "# Lines from the running .env that are not in the blob. To keep one,"
+      echo "# move it ABOVE the marker line; ${APP}-secrets-commit drops the rest."
+      cat "\$RAM_ONLY"
+    } >> "\$EDIT_FILE"
+    echo "  Their full lines are at the end of the copy, below the marker line."
+    echo "  Move what you want to keep above it -- the rest is dropped on commit."
+  fi
+  shred -u "\$RAM_ONLY"
+fi
 
 # A warning, never a refusal, if the running .env is on neither a noswap
 # tmpfs nor a ramfs.
@@ -910,6 +963,8 @@ EDIT_FILE=/run/${APP}-secrets-edit/env.edit
 BLOB=/etc/credstore.encrypted/${APP}-env
 GUARD=/usr/local/sbin/${APP}-secrets-guard
 INSTALLER=/root/ram-only-secrets-install.sh
+# Same string as in ${APP}-secrets-open.
+MARK='#### ${APP}-secrets-open: everything from this line down is NOT committed ####'
 
 if [ "\$(id -u)" -ne 0 ]; then
   echo "Run as root (sudo \$0)" >&2
@@ -931,6 +986,35 @@ trap 'if [ -e "\$EDIT_FILE" ]; then echo "The plaintext edit copy is still at \$
 
 if [ ! -s "\$EDIT_FILE" ]; then
   echo "No edit found at \$EDIT_FILE (or it's empty) -- run ${APP}-secrets-open first." >&2
+  exit 1
+fi
+
+# Drop the marker line ${APP}-secrets-open appended and everything below
+# it: running-.env lines only get committed once moved above the marker.
+MARK_LINE=\$(grep -n -F -x -- "\$MARK" "\$EDIT_FILE" | head -n 1 | cut -d: -f1)
+if [ -n "\$MARK_LINE" ]; then
+  sed "\${MARK_LINE},\\\$d" "\$EDIT_FILE" > "\$EDIT_DIR/env.cut"
+  cat "\$EDIT_DIR/env.cut" > "\$EDIT_FILE"
+  shred -u "\$EDIT_DIR/env.cut"
+  if [ ! -s "\$EDIT_FILE" ]; then
+    echo "Nothing above the marker line in \$EDIT_FILE -- refusing to commit an empty bundle." >&2
+    exit 1
+  fi
+elif grep -q -F -- "\$MARK" "\$EDIT_FILE"; then
+  # The marker shares a line with other text. Committing the whole file
+  # would take in the running-.env lines below it unseen.
+  echo "The marker line in \$EDIT_FILE has other text on the same line -- refusing to commit." >&2
+  echo "Put the marker on a line of its own (or delete it and everything below it), then run ${APP}-secrets-commit again." >&2
+  exit 1
+fi
+
+# One line per name. With two, which value applies is up to whatever reads
+# the .env, and ${APP}-secrets-drift could not tell from the names which
+# one is running. Names only in the message, never values.
+DUP_NAMES=\$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "\$EDIT_FILE" | sort | uniq -d | tr '\n' ' ')
+if [ -n "\$DUP_NAMES" ]; then
+  echo "More than one line in \$EDIT_FILE sets: \${DUP_NAMES% } -- refusing to commit." >&2
+  echo "Keep one line per name, then run ${APP}-secrets-commit again." >&2
   exit 1
 fi
 
@@ -1030,7 +1114,7 @@ ExecStartPre=/usr/local/sbin/${APP}-secrets-guard check
 ExecStart=/usr/local/sbin/${APP}-secrets-guard mount /run/${APP}-secrets
 # In the sh -c lines below, every \$ meant for the shell is written \$\$:
 # systemd.service(5) turns \$\$ into one literal \$ before sh runs.
-# On a noswap tmpfs (capped at 2 MiB) the directory and .env go to
+# On a noswap tmpfs (capped at 4 MiB) the directory and .env go to
 # ${APP_USER}, 0750 and 0600, as always. On a ramfs, which has no size
 # limit, root keeps both and ${APP_USER} reads .env through its group
 # (0750 and 0440), so it cannot fill RAM there (ros_mount_ramfs in the guard).
@@ -1042,6 +1126,180 @@ ExecStartPost=/bin/sh -c 'i=/root/ram-only-secrets-install.sh; if [ -e "\$\$i" ]
 WantedBy=multi-user.target
 UNIT_EOF
 echo "Installed /etc/systemd/system/${APP}-secrets.service"
+
+# --- 2b. Drift check (Section 4.6) ---
+cat > "/usr/local/sbin/${APP}-secrets-drift" <<SCRIPT_EOF
+#!/bin/sh
+# Compares the running .env with the encrypted bundle and reports drift by
+# NAME only: names only in the running .env, with a different value there,
+# or missing there. ${APP}-secrets-drift.path starts it whenever the running
+# .env changes, ${APP}-secrets-drift.timer hourly as a backstop. New drift,
+# its end and any failure are logged and handed to every hook in HOOK_DIR
+# as: HOOK EVENT APP ADDED CHANGED MISSING (Section 4.6). Values are never
+# printed, logged or passed on.
+set -eu
+umask 077
+
+APP=${APP}
+BLOB=/etc/credstore.encrypted/${APP}-env
+RUNNING_ENV=/run/${APP}-secrets/.env
+GUARD=/usr/local/sbin/${APP}-secrets-guard
+HOOK_DIR=/etc/ram-only-secrets/drift.d
+HOOK_OWNER=0
+STATE=/run/ram-only-secrets-drift/${APP}
+
+if [ "\$(id -u)" -ne 0 ]; then
+  echo "Run as root (sudo \$0)" >&2
+  exit 1
+fi
+
+# Same core dump protection as in ${APP}-secrets-open; here it covers
+# systemd-creds decrypt and the grep and sed that read its output.
+if [ -e /proc/\$\$/coredump_filter ]; then echo 0 > /proc/\$\$/coredump_filter; fi
+
+# Started by the .path unit: let a burst of writes settle first.
+if [ "\${1:-}" = --wait ]; then sleep "\${2:-15}"; fi
+
+say() { echo "\$*"; logger -t ${APP}-secrets-drift -- "\$*" 2>/dev/null || true; }
+
+# Hooks must be root's alone: a hook anyone else could change would run as
+# root. The directory is checked the same way.
+run_hooks() {
+  [ -d "\$HOOK_DIR" ] || return 0
+  if [ "\$(stat -c %u "\$HOOK_DIR")" != "\$HOOK_OWNER" ] || [ -n "\$(find "\$HOOK_DIR" -maxdepth 0 -perm /022)" ]; then
+    say "not running hooks: \$HOOK_DIR is not root-owned, or others can write to it"
+    return 0
+  fi
+  for h in "\$HOOK_DIR"/*; do
+    [ -f "\$h" ] && [ -x "\$h" ] || continue
+    if [ "\$(stat -c %u "\$h")" != "\$HOOK_OWNER" ] || [ -n "\$(find "\$h" -perm /022)" ]; then
+      say "skipping hook \$h: not root-owned, or others can write to it"
+      continue
+    fi
+    # SIGTERM after 60 seconds, SIGKILL 10 seconds later: a hook that
+    # ignores SIGTERM must not hold up the hooks after it.
+    timeout -k 10 60 "\$h" "\$@" || say "hook \$h failed (exit \$?)"
+  done
+}
+
+fail() {
+  say "error: \$*"
+  run_hooks error "\$APP" "" "" ""
+  exit 1
+}
+
+# Hard requirement, as everywhere else: no plaintext while swap could take
+# it (Section 4.5).
+"\$GUARD" check >/dev/null 2>&1 || fail "the swap guard refuses (run \$GUARD check)"
+[ -f "\$BLOB" ] || fail "no blob at \$BLOB"
+[ -f "\$RUNNING_ENV" ] || fail "no running .env at \$RUNNING_ENV"
+
+names() { sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' | sort -u; }
+blob() { systemd-creds decrypt --name=${APP}-env "\$BLOB" - 2>/dev/null; }
+# The running .env's lines that are not in the blob. The blob's lines reach
+# grep as patterns on a pipe (-f -), never on a command line, where any
+# local user can read them in /proc/PID/cmdline (proc(5)).
+extra() { blob | grep -Fxv -f - "\$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*\$' || true; }
+# The blob's lines that are not in the running .env, the running .env's
+# lines as patterns from the file. A name can still be there with another
+# of its values: a blob with KEY=old and KEY=new against a running KEY=old.
+gone() { blob | grep -Fxv -f "\$RUNNING_ENV" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*\$' || true; }
+
+# A failed decrypt would hand grep no patterns and make every line look new.
+blob > /dev/null || fail "cannot decrypt \$BLOB"
+
+BLOB_NAMES=\$(blob | names | tr '\n' ' ')
+RUN_NAMES=\$(names < "\$RUNNING_ENV" | tr '\n' ' ')
+ADDED="" CHANGED="" MISSING=""
+# A name in both files whose lines differ has a different value there. A
+# name only in the blob is missing (below), one only in the running .env
+# is added.
+for n in \$( { extra; gone; } | names); do
+  case " \$BLOB_NAMES " in
+    *" \$n "*)
+      case " \$RUN_NAMES " in
+        *" \$n "*) CHANGED="\$CHANGED \$n" ;;
+      esac ;;
+    *) ADDED="\$ADDED \$n" ;;
+  esac
+done
+for n in \$BLOB_NAMES; do
+  case " \$RUN_NAMES " in
+    *" \$n "*) ;;
+    *) MISSING="\$MISSING \$n" ;;
+  esac
+done
+ADDED=\${ADDED# } CHANGED=\${CHANGED# } MISSING=\${MISSING# }
+
+mkdir -p "\${STATE%/*}"
+LAST=\$(cat "\$STATE" 2>/dev/null || true)
+if ! { extra; gone; } | grep -q .; then
+  if [ -n "\$LAST" ]; then
+    rm -f "\$STATE"
+    say "in sync again: the running .env matches the blob"
+    run_hooks resolved "\$APP" "" "" ""
+  fi
+  exit 0
+fi
+
+# One hash of what differs: the differing lines of both files, so a second
+# change to the same name counts as new, and the missing names. Kept in
+# RAM, root-only, only to tell new drift from drift already reported.
+SUM=\$( { extra; echo "gone:"; gone; echo "missing: \$MISSING"; } | sha256sum | cut -d' ' -f1)
+if [ "\$SUM" = "\$LAST" ]; then exit 0; fi
+printf '%s\n' "\$SUM" > "\$STATE"
+say "drift: only in the running .env: \${ADDED:--}; different value there: \${CHANGED:--}; missing there: \${MISSING:--}"
+run_hooks drift "\$APP" "\$ADDED" "\$CHANGED" "\$MISSING"
+SCRIPT_EOF
+chmod 750 "/usr/local/sbin/${APP}-secrets-drift"
+
+cat > "/etc/systemd/system/${APP}-secrets-drift.service" <<UNIT_EOF
+[Unit]
+Description=Compare the running ${APP} .env with its encrypted bundle (names only)
+After=${APP}-secrets.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/${APP}-secrets-drift --wait 15
+# Same reasoning as in ${APP}-secrets.service (Section 4.2).
+CoredumpFilter=0
+# Where the last reported drift is remembered, in RAM. Kept between runs.
+RuntimeDirectory=ram-only-secrets-drift
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UNIT_EOF
+
+cat > "/etc/systemd/system/${APP}-secrets-drift.path" <<UNIT_EOF
+[Unit]
+Description=Watch the running ${APP} .env for changes
+# The watch has to be set on the noswap tmpfs ${APP}-secrets.service mounts
+# over /run/${APP}-secrets, not on the directory underneath it.
+After=${APP}-secrets.service
+
+[Path]
+PathChanged=/run/${APP}-secrets/.env
+Unit=${APP}-secrets-drift.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+cat > "/etc/systemd/system/${APP}-secrets-drift.timer" <<UNIT_EOF
+[Unit]
+Description=Hourly backstop for ${APP}-secrets-drift
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Unit=${APP}-secrets-drift.service
+
+[Install]
+WantedBy=timers.target
+UNIT_EOF
+
+# Shared by every instance; hooks are root's own (Section 4.6).
+install -d -m 0755 /etc/ram-only-secrets/drift.d
+echo "Installed /usr/local/sbin/${APP}-secrets-drift and its .service, .path and .timer"
 
 # --- 3. credstore directory ---
 install -d -m 0755 /etc/credstore.encrypted
@@ -1096,6 +1354,7 @@ trap - EXIT
 # --- 5-6. Enable, start, verify ---
 systemctl daemon-reload
 systemctl enable --now "${APP}-secrets.service"
+systemctl enable --now "${APP}-secrets-drift.path" "${APP}-secrets-drift.timer"
 systemctl status "${APP}-secrets.service" --no-pager || true
 ls -l "/run/${APP}-secrets/.env"
 # Own tmpfs with noswap (Section 4.5)? A warning here means the plain

@@ -96,6 +96,8 @@ plaintext secrets (root, one-time)
     |  read at boot by YOUR_APP-secrets.service, via LoadCredentialEncrypted=
     v
 /run/YOUR_APP-secrets/.env                 -- plaintext, own noswap tmpfs (0600, YOUR_APP_USER) or ramfs (0440, root:YOUR_APP_USER)
+    |  watched by YOUR_APP-secrets-drift (.path on change, .timer hourly):
+    |  names that differ from the blob -> journal + hooks, never values
     |  symlinked from the app's own working directory
     v
 YOUR_APP_DIR/.env  ->  /run/YOUR_APP-secrets/.env
