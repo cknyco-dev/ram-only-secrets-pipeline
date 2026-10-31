@@ -1321,10 +1321,19 @@ ros_mount_secrets_dir() {
   fi
 
   # Moving from the old layout: a .env left in the plain directory sits on
-  # /run's shared, swappable tmpfs. Delete it before the new mount hides it,
-  # where it would linger unseen until reboot. (The edit directory never
-  # holds a .env, so there this does nothing.)
-  rm -f -- "$ros_dir/.env"
+  # /run's shared, swappable tmpfs. It holds plaintext, so it is shredded,
+  # like every plaintext file here, before the new mount hides it, where it
+  # would linger unseen until reboot. (The edit directory never holds a
+  # .env, so there this does nothing.) That directory belongs to the
+  # application user, who can put anything at the .env path, and this runs
+  # as root: shred follows a symlink and would overwrite its target. Only a
+  # regular file is shredded; anything else (a symlink, which holds no
+  # plaintext) is just unlinked.
+  if [ -f "$ros_dir/.env" ] && [ ! -L "$ros_dir/.env" ]; then
+    shred -u -- "$ros_dir/.env"
+  else
+    rm -f -- "$ros_dir/.env"
+  fi
   if [ ! -d "$ros_dir" ] && ! mkdir -m 0700 -- "$ros_dir"; then
     ros_say "cannot create $ros_dir. Refusing; nothing was written to it."
     return 1

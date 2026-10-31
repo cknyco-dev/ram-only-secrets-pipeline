@@ -135,6 +135,19 @@ ros_umount() {
 }
 FAKE_NS=same
 ros_same_mount_ns() { [ "$FAKE_NS" = same ]; }
+# shred is not on every test host; this one logs its arguments, so a test
+# can see that a plaintext file was shredded and not just removed. Like the
+# real one it writes through a symlink, refuses what is not a file ("invalid
+# file type", a FIFO for one) and removes the name.
+# shellcheck disable=SC2329 # called by ros_mount_secrets_dir
+shred() {
+  echo "shred $*" >> "$T/shred.log"
+  shift
+  [ "$1" = -- ] && shift
+  [ -f "$1" ] || return 1
+  : > "$1"
+  rm -f -- "$1"
+}
 # ros_pause runs PAUSE_HOOK instead of sleeping, so a test can change the
 # fixture between the first read and the retry.
 PAUSE_HOOK=:
@@ -410,8 +423,26 @@ t "restart reuses the existing noswap tmpfs" 0 "*already a noswap tmpfs; reusing
 expect "restart: still exactly one mount, nothing stacked" [ "$(lines_at "$D")" = 1 ]
 
 reset; FAKE_MOUNT=ok; mkdir -p "$D"; echo 'OLD=plaintext' > "$D/.env"
+rm -f "$T/shred.log"
 t "migration from the plain-directory layout" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
 expect "migration: old .env on /run's shared tmpfs is deleted first" [ ! -e "$D/.env" ]
+expect "migration: old .env is shredded, not just removed" grep -qxF "shred -u -- $D/.env" "$T/shred.log"
+expect "installer shreds the old .env only if it is a regular file, not a symlink" \
+  grep -qxF '  if [ -f "$ros_dir/.env" ] && [ ! -L "$ros_dir/.env" ]; then' "$INSTALLER"
+
+# The application user owns the plain directory and can put a symlink at
+# .env; the guard runs as root. The link goes, its target stays untouched.
+reset; FAKE_MOUNT=ok; mkdir -p "$D"; echo 'victim-content' > "$T/victim"; ln -s "$T/victim" "$D/.env"
+rm -f "$T/shred.log"
+t "migration: a symlink at .env is unlinked" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
+expect "migration: the symlink at .env is gone" [ ! -e "$D/.env" ]
+expect "migration: the symlink's target is not shredded" [ "$(cat "$T/victim")" = victim-content ]
+expect "migration: shred was not called for a symlink" [ ! -e "$T/shred.log" ]
+reset; FAKE_MOUNT=ok; mkdir -p "$D"; mkfifo "$D/.env"
+rm -f "$T/shred.log"
+t "migration: a FIFO at .env is unlinked, not opened" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
+expect "migration: the FIFO at .env is gone" [ ! -e "$D/.env" ]
+expect "migration: shred was not called for a FIFO" [ ! -e "$T/shred.log" ]
 
 reset; echo "90 25 0:50 / $D rw,relatime shared:44 - tmpfs tmpfs rw,size=1024k,inode64" >> "$ROS_MOUNTINFO"
 t "existing tmpfs without noswap is refused" 1 "*neither a noswap tmpfs nor a ramfs*nothing was written*" ros_mount_secrets_dir "$D"
