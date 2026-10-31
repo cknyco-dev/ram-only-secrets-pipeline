@@ -9,10 +9,10 @@
 # How it fakes a host without root: it cuts the ros-lib block out of the
 # installer with the same sed expression the installer uses to generate
 # /usr/local/sbin/YOUR_APP-secrets-guard, loads it, points the seven ROS_*
-# path variables at a fixture tree, and replaces the six root-only
+# path variables at a fixture tree, and replaces the seven root-only
 # wrappers (ros_is_blockdev, ros_stat_devnum, ros_mount_noswap,
-# ros_mount_ramfs, ros_umount, ros_same_mount_ns) plus ros_pause. Everything else runs
-# exactly as shipped. A fake device node is a regular file with a
+# ros_mount_ramfs, ros_umount, ros_same_mount_ns, ros_lock_dir) plus
+# ros_pause. Everything else runs exactly as shipped. A fake device node is a regular file with a
 # NODE.devnum sidecar holding "MAJOR MINOR" in hex, the way stat -c
 # '%t %T' prints it.
 #
@@ -135,6 +135,14 @@ ros_umount() {
 }
 FAKE_NS=same
 ros_same_mount_ns() { [ "$FAKE_NS" = same ]; }
+# ros_lock_dir would chown to root. OPS_LOG records it and the shred below
+# in the order they happen.
+FAKE_LOCK=ok
+# shellcheck disable=SC2329 # called by ros_mount_secrets_dir
+ros_lock_dir() {
+  echo "lock $1" >> "$T/ops.log"
+  [ "$FAKE_LOCK" = ok ]
+}
 # shred is not on every test host; this one logs its arguments, so a test
 # can see that a plaintext file was shredded and not just removed. Like the
 # real one it writes through a symlink, refuses what is not a file ("invalid
@@ -142,6 +150,7 @@ ros_same_mount_ns() { [ "$FAKE_NS" = same ]; }
 # shellcheck disable=SC2329 # called by ros_mount_secrets_dir
 shred() {
   echo "shred $*" >> "$T/shred.log"
+  echo "shred $*" >> "$T/ops.log"
   shift
   [ "$1" = -- ] && shift
   [ -f "$1" ] || return 1
@@ -416,28 +425,46 @@ echo "# noswap mount of the secrets directory"
 D=$F/run/myapp-secrets
 lines_at() { grep -c " $1 " "$ROS_MOUNTINFO"; }
 
-reset; FAKE_MOUNT=ok
+reset; FAKE_MOUNT=ok; rm -f "$T/ops.log"
 t "fresh mount on 7.0" 0 "*mounted a noswap tmpfs on*" ros_mount_secrets_dir "$D"
 expect "fresh mount: exactly one mount at the directory" [ "$(lines_at "$D")" = 1 ]
 t "restart reuses the existing noswap tmpfs" 0 "*already a noswap tmpfs; reusing it*" ros_mount_secrets_dir "$D"
 expect "restart: still exactly one mount, nothing stacked" [ "$(lines_at "$D")" = 1 ]
+expect "a directory that does not exist yet, or is a mount already, is not locked" [ ! -e "$T/ops.log" ]
 
 reset; FAKE_MOUNT=ok; mkdir -p "$D"; echo 'OLD=plaintext' > "$D/.env"
-rm -f "$T/shred.log"
+rm -f "$T/shred.log" "$T/ops.log"
 t "migration from the plain-directory layout" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
 expect "migration: old .env on /run's shared tmpfs is deleted first" [ ! -e "$D/.env" ]
 expect "migration: old .env is shredded, not just removed" grep -qxF "shred -u -- $D/.env" "$T/shred.log"
+# The real ros_lock_dir needs root; here only that it takes ownership
+# before it changes the mode (the owner can write whatever the mode says).
+expect "ros_lock_dir takes ownership before it changes the mode" \
+  grep -qxF 'ros_lock_dir() { chown root:root -- "$1" && chmod 0700 -- "$1"; }' "$T/lib.sh"
+expect "migration: the directory goes to root before the .env is looked at" \
+  [ "$(cat "$T/ops.log")" = "$(printf 'lock %s\nshred -u -- %s/.env' "$D" "$D")" ]
 expect "installer shreds the old .env only if it is a regular file, not a symlink" \
   grep -qxF '  if [ -f "$ros_dir/.env" ] && [ ! -L "$ros_dir/.env" ]; then' "$INSTALLER"
 
 # The application user owns the plain directory and can put a symlink at
 # .env; the guard runs as root. The link goes, its target stays untouched.
 reset; FAKE_MOUNT=ok; mkdir -p "$D"; echo 'victim-content' > "$T/victim"; ln -s "$T/victim" "$D/.env"
-rm -f "$T/shred.log"
+rm -f "$T/shred.log" "$T/ops.log"
 t "migration: a symlink at .env is unlinked" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"
 expect "migration: the symlink at .env is gone" [ ! -e "$D/.env" ]
 expect "migration: the symlink's target is not shredded" [ "$(cat "$T/victim")" = victim-content ]
 expect "migration: shred was not called for a symlink" [ ! -e "$T/shred.log" ]
+expect "migration: the directory was locked before the symlink was touched" \
+  [ "$(cat "$T/ops.log")" = "lock $D" ]
+# If the directory cannot be handed to root, the application user could
+# still swap .env: refuse, leave everything as it was.
+reset; FAKE_MOUNT=ok; FAKE_LOCK=fail; mkdir -p "$D"; echo 'OLD=plaintext' > "$D/.env"
+rm -f "$T/shred.log" "$T/ops.log"
+t "migration: refuses when the directory cannot be made root-only" 1 "*cannot make * root-only*Refusing; nothing was written*" ros_mount_secrets_dir "$D"
+FAKE_LOCK=ok
+expect "migration: after that refusal the .env is untouched" [ "$(cat "$D/.env")" = OLD=plaintext ]
+expect "migration: after that refusal nothing was shredded" [ ! -e "$T/shred.log" ]
+expect "migration: after that refusal nothing was mounted" [ "$(lines_at "$D")" = 0 ]
 reset; FAKE_MOUNT=ok; mkdir -p "$D"; mkfifo "$D/.env"
 rm -f "$T/shred.log"
 t "migration: a FIFO at .env is unlinked, not opened" 0 "*mounted a noswap tmpfs*" ros_mount_secrets_dir "$D"

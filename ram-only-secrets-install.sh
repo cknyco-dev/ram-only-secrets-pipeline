@@ -147,11 +147,12 @@ ros_me=${0##*/}
 ros_say() { printf '%s: %s\n' "$ros_me" "$*" >&2; }
 ros_info() { printf '%s: %s\n' "$ros_me" "$*"; }
 
-# The only six operations a test cannot fake without root: asking whether
+# The only seven operations a test cannot fake without root: asking whether
 # a path is a block device, reading its device number, mounting a noswap
-# tmpfs, mounting a ramfs, umount, and comparing this process's mount
-# namespace with PID 1's. tests/run.sh replaces exactly these six, plus
-# ros_pause so the tests don't wait; everything else runs as is.
+# tmpfs, mounting a ramfs, umount, comparing this process's mount
+# namespace with PID 1's, and making a directory root-only. tests/run.sh
+# replaces exactly these seven, plus ros_pause so the tests don't wait;
+# everything else runs as is.
 ros_is_blockdev() { [ -b "$1" ]; }
 # stat prints a device node's major and minor number in hex, lowercase and
 # without "0x", and -L follows a symlink to the node. GNU coreutils does,
@@ -197,6 +198,10 @@ ros_mount_ramfs() {
   mount -t ramfs -o mode=0700,nosuid,nodev,noexec ramfs "$1"
 }
 ros_umount() { umount "$1"; }
+# Hands a directory to root alone. chown comes first: the owner of a
+# directory can write to it whatever its mode says, so while the application
+# user still owned it, it could swap entries under root's feet.
+ros_lock_dir() { chown root:root -- "$1" && chmod 0700 -- "$1"; }
 
 # zram registers one dynamic block major named "zram"
 # (drivers/block/zram/zram_drv.c:3286, register_blkdev(0, "zram")), listed
@@ -570,7 +575,14 @@ ros_mount_secrets_dir() {
   # application user, who can put anything at the .env path, and this runs
   # as root: shred follows a symlink and would overwrite its target. Only a
   # regular file is shredded; anything else (a symlink, which holds no
-  # plaintext) is just unlinked.
+  # plaintext) is just unlinked. And the application user could swap .env
+  # between the check and the shred, so the directory goes to root first
+  # (/run is root's, so the directory itself cannot be swapped); the unit's
+  # next ExecStart= line hands it back, as it does after a fresh mount.
+  if [ -d "$ros_dir" ] && ! ros_lock_dir "$ros_dir"; then
+    ros_say "cannot make $ros_dir root-only. Refusing; nothing was written to it."
+    return 1
+  fi
   if [ -f "$ros_dir/.env" ] && [ ! -L "$ros_dir/.env" ]; then
     shred -u -- "$ros_dir/.env"
   else
